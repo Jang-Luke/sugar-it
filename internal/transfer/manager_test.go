@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
+
 	"sugarintegration/internal/shares"
 	"sugarintegration/internal/vfs"
 )
@@ -1971,4 +1973,123 @@ func TestActivePart(t *testing.T) {
 	if err := m.Cancel(failed); err == nil {
 		t.Error("failed job is not cancelable")
 	}
+}
+
+// apfsDest behaves like APFS: names differing by case or by Unicode
+// normalization are one file. It records the names the job asked for.
+type apfsDest struct {
+	*shares.LocalFS
+	mu        sync.Mutex
+	committed []string
+}
+
+func apfsName(p string) string { return norm.NFC.String(strings.ToLower(p)) }
+
+func (d *apfsDest) Stat(ctx context.Context, p string) (vfs.Entry, error) {
+	return d.LocalFS.Stat(ctx, apfsName(p))
+}
+func (d *apfsDest) List(ctx context.Context, p string) ([]vfs.Entry, error) {
+	return d.LocalFS.List(ctx, apfsName(p))
+}
+func (d *apfsDest) Hash(ctx context.Context, p string) (string, error) {
+	return d.LocalFS.Hash(ctx, apfsName(p))
+}
+func (d *apfsDest) Mkdir(ctx context.Context, p string) error {
+	return d.LocalFS.Mkdir(ctx, apfsName(p))
+}
+func (d *apfsDest) Remove(ctx context.Context, p string, recursive bool) error {
+	return d.LocalFS.Remove(ctx, apfsName(p), recursive)
+}
+func (d *apfsDest) Rename(ctx context.Context, from, to string) error {
+	return d.LocalFS.Rename(ctx, apfsName(from), apfsName(to))
+}
+func (d *apfsDest) CommitPart(key, dst string, mt time.Time, mode uint32) error {
+	d.mu.Lock()
+	d.committed = append(d.committed, dst)
+	d.mu.Unlock()
+	return d.LocalFS.CommitPart(key, apfsName(dst), mt, mode)
+}
+
+var (
+	koreanNFC = norm.NFC.String("한글.txt")
+	koreanNFD = norm.NFD.String("한글.txt")
+)
+
+func TestNormalizationCollisionKeepsSecondSource(t *testing.T) {
+	if koreanNFC == koreanNFD {
+		t.Fatal("the two spellings must differ")
+	}
+	for _, op := range []string{"move", "copy"} {
+		t.Run(op, func(t *testing.T) {
+			r := newRig(t)
+			r.opts.GOOS = "darwin"
+			d := &apfsDest{LocalFS: r.dst}
+			r.dstF = d
+			// The walk is sorted by bytes: the NFD spelling comes first.
+			r.tree(r.srcDir, map[string]string{"t/" + koreanNFD: "nfd-content", "t/" + koreanNFC: "nfc-content"})
+			r.start()
+			s := cpSpec(op, "t", "")
+			s.OnConflict = ConflictOverwrite
+			id := r.submit(s)
+			j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+			if j.State != StatePartial || j.DoneFiles != 1 || j.FailedFiles != 1 {
+				t.Fatalf("%+v", j)
+			}
+			if f := j.Failures[0]; f.Code != vfs.CodeConflict || f.Path != "t/"+koreanNFC {
+				t.Errorf("%+v", f)
+			}
+			r.wantFile(r.dstDir, "t/"+koreanNFC, "nfd-content") // apfsDest stores NFC
+			if ents, _ := os.ReadDir(filepath.Join(r.dstDir, "t")); len(ents) != 1 {
+				t.Errorf("destination: %v", ents)
+			}
+			r.wantFile(r.srcDir, "t/"+koreanNFC, "nfc-content")
+			if op == "move" {
+				r.wantGone(r.srcDir, "t/"+koreanNFD)
+			} else {
+				r.wantFile(r.srcDir, "t/"+koreanNFD, "nfd-content")
+			}
+			// The key is for comparison only: the job asked for the bytes it read.
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if !slices.Equal(d.committed, []string{"t/" + koreanNFD}) {
+				t.Errorf("committed %q", d.committed)
+			}
+		})
+	}
+}
+
+// Windows folds case but does not normalize: the two spellings are two files.
+// A destination that keeps bytes keeps them exactly, on any OS.
+func TestNormalizationSpellingsKeptByteForByte(t *testing.T) {
+	r := newRig(t)
+	r.opts.GOOS = "windows"
+	r.tree(r.srcDir, map[string]string{"t/" + koreanNFD: "nfd-content", "t/" + koreanNFC: "nfc-content"})
+	r.start()
+	j := r.waitDone(r.submit(cpSpec("move", "t", "")))
+	if j.DoneFiles != 2 {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "t/"+koreanNFD, "nfd-content")
+	r.wantFile(r.dstDir, "t/"+koreanNFC, "nfc-content")
+
+	r2 := newRig(t)
+	r2.opts.GOOS = "darwin"
+	r2.tree(r2.srcDir, map[string]string{koreanNFD: "only"})
+	r2.start()
+	r2.waitDone(r2.submit(cpSpec("copy", koreanNFD, "")))
+	r2.wantFile(r2.dstDir, koreanNFD, "only")
+	r2.wantGone(r2.dstDir, koreanNFC)
+}
+
+// The self-move check uses the same key: the NFC spelling of a directory is
+// the NFD directory on darwin.
+func TestSelfMoveNormalizedSpellingRejected(t *testing.T) {
+	nfcDir, nfdDir := norm.NFC.String("폴더"), norm.NFD.String("폴더")
+	r := newRig(t)
+	r.opts.GOOS = "darwin"
+	r.tree(r.dstDir, map[string]string{nfdDir + "/x": "1"})
+	r.start()
+	s := Spec{Op: "move", Src: Endpoint{Peer: self, Share: "d", Path: nfdDir}, Dst: Endpoint{Peer: self, Share: "d", Path: nfcDir + "/b"}}
+	_, err := r.m.Submit("o", s)
+	wantCode(t, err, vfs.CodeInvalidRequest)
 }

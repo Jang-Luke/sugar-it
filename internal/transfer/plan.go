@@ -41,10 +41,12 @@ func ResolveDst(ctx context.Context, src vfs.Entry, dst Dest, dstPath string) (s
 // after ResolveDst, because "a" into the root resolves to "a". srcEntry is
 // not consulted: a file is rejected the same way a directory is.
 func Validate(s Spec, srcEntry vfs.Entry, srcReadOnly bool) error {
-	return validate(s, srcReadOnly, false)
+	return validate(s, srcReadOnly, func(p string) string { return p })
 }
 
-func validate(s Spec, srcReadOnly, foldCase bool) error {
+// validate compares paths through key, which says what is one file on the
+// destination filesystem.
+func validate(s Spec, srcReadOnly bool, key func(string) string) error {
 	if s.Op != "copy" && s.Op != "move" {
 		return vfs.E(vfs.CodeInvalidRequest, "unknown operation %q", s.Op)
 	}
@@ -65,9 +67,7 @@ func validate(s Spec, srcReadOnly, foldCase bool) error {
 		return vfs.E(vfs.CodeReadOnly, "cannot move out of a read-only share")
 	}
 	if s.Src.Peer == s.Dst.Peer && s.Src.Share == s.Dst.Share {
-		if foldCase {
-			from, to = foldPath(from), foldPath(to)
-		}
+		from, to = key(from), key(to)
 		if from == "" || to == from || strings.HasPrefix(to, from+"/") {
 			return vfs.E(vfs.CodeInvalidRequest, "cannot %s %q onto or into itself", s.Op, s.Src.Path)
 		}

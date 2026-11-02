@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
+
 	"sugarintegration/internal/shares"
 	"sugarintegration/internal/vfs"
 )
@@ -164,7 +166,7 @@ func (m *Manager) Submit(origin string, s Spec) (Job, error) {
 	if s.OnConflict == "" {
 		s.OnConflict = ConflictFail
 	}
-	if err := validate(s, false, m.foldCase()); err != nil {
+	if err := validate(s, false, m.destKey); err != nil {
 		return Job{}, err
 	}
 	dst, err := m.o.Dest(s.Dst.Share)
@@ -358,7 +360,22 @@ func (m *Manager) save(js *jobState) error {
 	return writeRecord(dir, b)
 }
 
-func (m *Manager) foldCase() bool { return m.o.GOOS == "windows" || m.o.GOOS == "darwin" }
+// destKey maps a path to what identifies it on the destination filesystem:
+// names with one key are one file. On darwin, APFS and HFS+ ignore case and
+// Unicode normalization; on windows, NTFS ignores case only. Elsewhere bytes
+// decide. The key is for comparison only: names are written as they came.
+func (m *Manager) destKey(p string) string {
+	switch m.o.GOOS {
+	case "darwin":
+		return norm.NFC.String(foldCase(p))
+	case "windows":
+		return foldCase(p)
+	}
+	return p
+}
+
+// foldsNames reports whether different names can be one destination file.
+func (m *Manager) foldsNames() bool { return m.o.GOOS == "darwin" || m.o.GOOS == "windows" }
 
 // check validates s against the live state of the source share.
 func (m *Manager) check(ctx context.Context, s Spec) error {
@@ -369,7 +386,7 @@ func (m *Manager) check(ctx context.Context, s Spec) error {
 			return err
 		}
 	}
-	return validate(s, ro, m.foldCase())
+	return validate(s, ro, m.destKey)
 }
 
 // resolve applies ResolveDst and validates the result. The source's name is
@@ -388,7 +405,7 @@ func (m *Manager) resolve(ctx context.Context, s Spec, se vfs.Entry, dst Dest) (
 		return "", err
 	}
 	s.Dst.Path = to
-	if err := validate(s, false, m.foldCase()); err != nil {
+	if err := validate(s, false, m.destKey); err != nil {
 		return "", err
 	}
 	return to, nil
@@ -662,7 +679,7 @@ func (r *jobRun) run() (err error) {
 	m.mu.Lock()
 	js.partKeys = keys
 	m.mu.Unlock()
-	if m.foldCase() {
+	if m.foldsNames() {
 		r.taken = make(map[string]bool, len(r.done))
 		for _, e := range r.done {
 			r.take(e.D)
@@ -798,9 +815,9 @@ func messageOf(err error) string {
 	return err.Error()
 }
 
-// foldPath maps paths that differ only by case to one key. Lowering alone
+// foldCase maps paths that differ only by case to one string. Lowering alone
 // misses letters such as long s, which only meet their pair through upper case.
-func foldPath(p string) string { return strings.ToLower(strings.ToUpper(p)) }
+func foldCase(p string) string { return strings.ToLower(strings.ToUpper(p)) }
 
 func parentOf(p string) string {
 	if i := strings.LastIndexByte(p, '/'); i >= 0 {
@@ -895,18 +912,15 @@ func (r *jobRun) inOwnSource(p string) bool {
 	if !r.sameShare {
 		return false
 	}
-	root := r.root
-	if r.m.foldCase() {
-		root, p = foldPath(root), foldPath(p)
-	}
+	root, p := r.m.destKey(r.root), r.m.destKey(p)
 	return p == root || strings.HasPrefix(p, root+"/")
 }
 
-// take remembers a destination this job wrote, where names differing only by
-// case are one file and a second item must not replace it.
+// take remembers a destination this job wrote, so that a second item whose
+// name is the same file on this filesystem cannot replace it.
 func (r *jobRun) take(p string) {
 	if r.taken != nil {
-		r.taken[foldPath(p)] = true
+		r.taken[r.m.destKey(p)] = true
 	}
 }
 
@@ -922,8 +936,8 @@ func (r *jobRun) file(f planFile) error {
 	if r.inOwnSource(dstP) {
 		return r.fail(srcP, vfs.E(vfs.CodeConflict, "destination %q is inside this job's source", dstP))
 	}
-	if r.taken[foldPath(dstP)] {
-		return r.fail(srcP, vfs.E(vfs.CodeConflict, "destination %q differs only by case from a file this job already wrote", dstP))
+	if r.taken[r.m.destKey(dstP)] {
+		return r.fail(srcP, vfs.E(vfs.CodeConflict, "destination %q is the same name as a file this job already wrote, apart from case or normalization", dstP))
 	}
 	if err := r.ensureDir(parentOf(dstP)); err != nil {
 		return r.fail(srcP, err)
