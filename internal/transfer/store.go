@@ -17,6 +17,10 @@ const (
 	jobFile   = "job.json"
 	doneFile  = "done.log"
 	partsFile = "parts.log"
+	// renamesFile records a same-share rename before it happens. Unlike a
+	// done.log entry a record does not mean done: it only counts if the
+	// source is gone afterwards.
+	renamesFile = "renames.log"
 )
 
 // record is what job.json holds: the Job and what recovery needs beyond it.
@@ -107,12 +111,17 @@ func readDoneLog(path string) (map[string]doneEntry, error) {
 	}
 }
 
-// doneLog appends to done.log. Appends are not fsynced: losing the tail in a
-// power cut costs nothing, because a lost entry whose source exists is found
-// again by the crash-window rule, and one whose source is gone needs nothing.
-type doneLog struct{ f *os.File }
+// doneLog appends entries to a log file. An entry whose source can disappear
+// must be durable first, through appendDurable: with the source gone, the log
+// is all that says the destination is this job's file, and without that a
+// later item of the job could overwrite the only copy. An entry whose source
+// remains may use append: if lost, the crash-window rule finds the file again.
+type doneLog struct {
+	f    *os.File
+	sync func(*os.File) error
+}
 
-func openDoneLog(path string) (*doneLog, error) {
+func openDoneLog(path string, sync func(*os.File) error) (*doneLog, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
@@ -127,7 +136,7 @@ func openDoneLog(path string) (*doneLog, error) {
 			}
 		}
 	}
-	return &doneLog{f}, nil
+	return &doneLog{f, sync}, nil
 }
 
 func (l *doneLog) append(e doneEntry) error {
@@ -139,7 +148,23 @@ func (l *doneLog) append(e doneEntry) error {
 	return err
 }
 
+func (l *doneLog) appendDurable(e doneEntry) error {
+	if err := l.append(e); err != nil {
+		return err
+	}
+	return l.sync(l.f)
+}
+
 func (l *doneLog) close() { l.f.Close() }
+
+// syncDir makes a newly created file's name durable. Best effort: Windows
+// cannot sync a directory and makes its metadata durable another way.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+}
 
 // appendPartKey notes that key may hold a part file, so Cancel can find it
 // even when the source cannot be walked. Not fsynced: a part orphaned by a

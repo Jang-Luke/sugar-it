@@ -40,6 +40,8 @@ type Options struct {
 	Dest           func(share string) (Dest, error)
 
 	RetryMin, RetryMax, SaveEvery time.Duration // default 1s, 60s, 1s
+
+	syncFile func(*os.File) error // default (*os.File).Sync; tests observe it
 }
 
 // jobState is a job's record plus its in-memory scheduling state.
@@ -86,6 +88,9 @@ func NewManager(o Options) (*Manager, error) {
 	}
 	if o.SaveEvery <= 0 {
 		o.SaveEvery = time.Second
+	}
+	if o.syncFile == nil {
+		o.syncFile = (*os.File).Sync
 	}
 	m := &Manager{o: o, jobs: map[string]*jobState{}, wake: make(chan struct{}, 1)}
 	dir := filepath.Join(o.Dir, "jobs")
@@ -367,7 +372,9 @@ func (m *Manager) save(js *jobState) error {
 func (m *Manager) destKey(p string) string {
 	switch m.o.GOOS {
 	case "darwin":
-		return norm.NFC.String(foldCase(p))
+		// Normalize first so both spellings fold alike (U+0130 and U+1F80 do
+		// not otherwise), and again because folding can denormalize.
+		return norm.NFC.String(foldCase(norm.NFC.String(p)))
 	case "windows":
 		return foldCase(p)
 	}
@@ -573,6 +580,7 @@ type jobRun struct {
 	recovered bool   // an earlier attempt may have died after a commit
 	sameShare bool
 	log       *doneLog
+	renames   *doneLog // nil unless this job renames items
 	done      map[string]doneEntry
 	taken     map[string]bool // case-folded destinations of this job; nil if case matters
 
@@ -603,6 +611,10 @@ func (r *jobRun) run() (err error) {
 	if r.done, err = readDoneLog(filepath.Join(dir, doneFile)); err != nil {
 		return writeErr(err)
 	}
+	renameRecords, err := readDoneLog(filepath.Join(dir, renamesFile))
+	if err != nil {
+		return writeErr(err)
+	}
 
 	se, err := r.src.Stat(r.ctx, r.root)
 	gone := vfs.CodeOf(err) == vfs.CodeNotFound
@@ -623,7 +635,7 @@ func (r *jobRun) run() (err error) {
 		js.DoneFiles, js.DoneBytes = js.TotalFiles, js.TotalBytes
 		m.mu.Unlock()
 		return nil
-	case gone && (len(r.done) == 0 || spec.Op != "move"):
+	case gone && (len(r.done)+len(renameRecords) == 0 || spec.Op != "move"):
 		return err // only a move explains a source that is gone
 	case err != nil && !gone:
 		return err
@@ -662,6 +674,23 @@ func (r *jobRun) run() (err error) {
 			return err
 		}
 	}
+	if r.log, err = openDoneLog(filepath.Join(dir, doneFile), m.o.syncFile); err != nil {
+		return writeErr(err)
+	}
+	defer r.log.close()
+	if r.sameShare && spec.Op == "move" {
+		if r.renames, err = openDoneLog(filepath.Join(dir, renamesFile), m.o.syncFile); err != nil {
+			return writeErr(err)
+		}
+		defer r.renames.close()
+	}
+	if spec.Op == "move" {
+		syncDir(dir)
+		syncDir(filepath.Dir(dir))
+	}
+	if err := r.adoptRenames(pl, renameRecords); err != nil {
+		return err
+	}
 	r.applyPlanTotals(pl)
 	if err := r.ctx.Err(); err != nil {
 		return canceled()
@@ -671,10 +700,6 @@ func (r *jobRun) run() (err error) {
 		return err
 	}
 
-	if r.log, err = openDoneLog(filepath.Join(dir, doneFile)); err != nil {
-		return writeErr(err)
-	}
-	defer r.log.close()
 	keys := m.loadPartKeys(js.ID)
 	m.mu.Lock()
 	js.partKeys = keys
@@ -701,6 +726,32 @@ func (r *jobRun) run() (err error) {
 	}
 	if spec.Op == "move" {
 		return r.removeEmptyDirs(pl)
+	}
+	return nil
+}
+
+// adoptRenames turns a rename record into a done entry when the rename evidently
+// happened: its source is gone and its destination exists. A record whose
+// source is still there means the rename never did, and means nothing.
+func (r *jobRun) adoptRenames(pl *plan, records map[string]doneEntry) error {
+	inPlan := make(map[string]bool, len(pl.files))
+	for _, f := range pl.files {
+		inPlan[f.rel] = true
+	}
+	for rel, e := range records {
+		if _, logged := r.done[rel]; logged || inPlan[rel] {
+			continue
+		}
+		de, err := r.dst.Stat(r.ctx, e.D)
+		if vfs.CodeOf(err) == vfs.CodeNotFound {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		e.S, e.M = de.Size, de.ModTime
+		r.done[rel] = e
+		r.log.append(e) // if lost, the record is adopted again next time
 	}
 	return nil
 }
@@ -955,29 +1006,35 @@ func (r *jobRun) file(f planFile) error {
 		}
 	}
 	if r.sameShare && r.js.Spec.Op == "move" {
-		renamed, err := r.renameFile(f, srcP, dstP)
-		if renamed || err != nil {
+		settled, err := r.renameFile(f, srcP, dstP)
+		if settled || err != nil {
 			return err
 		}
 	}
 	return r.fetch(f, srcP, dstP, key)
 }
 
-// renameFile moves one file inside the share when its name is free. A taken
-// name returns false: Fetch then applies the conflict policy, and overwrite
-// replaces the old file atomically only after the new one is verified.
+// renameFile moves one file inside the share when its name is free. It reports
+// whether it settled the item. A taken name is not settled: Fetch then applies
+// the conflict policy, and overwrite replaces the old file atomically only
+// after the new one is verified. The record is durable before the rename, since
+// the source then disappears and a kill can come before the done.log entry.
 func (r *jobRun) renameFile(f planFile, srcP, dstP string) (bool, error) {
+	e := doneEntry{P: f.rel, D: dstP, S: f.size}
+	if err := r.renames.appendDurable(e); err != nil {
+		return true, r.fail(srcP, writeErr(err))
+	}
 	err := r.dst.Rename(r.ctx, srcP, dstP) // refuses a taken name
 	if vfs.CodeOf(err) == vfs.CodeExists {
 		return false, nil
 	}
 	if err != nil {
-		return false, r.fail(srcP, err)
+		return true, r.fail(srcP, err)
 	}
 	r.take(dstP)
 	r.addDone(f, f.size, 0)
-	// The source is gone, so a lost entry costs nothing.
-	if err := r.log.append(doneEntry{P: f.rel, D: dstP, S: f.size}); err != nil && shares.IsDiskFull(err) {
+	// The durable record covers this entry if it is lost.
+	if err := r.log.append(e); err != nil && shares.IsDiskFull(err) {
 		return true, writeErr(err)
 	}
 	return true, nil
@@ -1043,7 +1100,11 @@ func (r *jobRun) fetch(f planFile, srcP, dstP, key string) error {
 // a kill between any two of them recoverable: log it, then remove the source.
 // held is how many of the file's bytes DoneBytes already includes.
 func (r *jobRun) commitDone(f planFile, e doneEntry, held int64) error {
-	if err := r.log.append(e); err != nil {
+	write := r.log.append
+	if r.js.Spec.Op == "move" {
+		write = r.log.appendDurable // the source goes next
+	}
+	if err := write(e); err != nil {
 		return r.fail(r.srcPath(f.rel), writeErr(err)) // source kept
 	}
 	return r.finishLogged(f, e, held)

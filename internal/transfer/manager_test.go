@@ -31,13 +31,14 @@ const (
 // self. Source and Dest can be replaced while it runs.
 type rig struct {
 	*env
-	t    *testing.T
-	dir  string
-	mu   sync.Mutex
-	srcF vfs.FS // what Source returns for share "s"
-	dstF Dest   // what Dest returns for share "d"
-	sro  bool   // source share read-only
-	down bool   // source peer offline
+	t       *testing.T
+	dir     string
+	mu      sync.Mutex
+	srcF    vfs.FS // what Source returns for share "s"
+	dstF    Dest   // what Dest returns for share "d"
+	sro     bool   // source share read-only
+	selfSrc vfs.FS // if set, what Source returns for this host's share "d"
+	down    bool   // source peer offline
 
 	opts   Options
 	m      *Manager
@@ -61,6 +62,9 @@ func newRig(t *testing.T) *rig {
 				}
 				return r.srcF, nil
 			case peer == self && share == "d":
+				if r.selfSrc != nil {
+					return r.selfSrc, nil
+				}
 				return r.dstF, nil
 			}
 			return nil, vfs.E(vfs.CodeShareNotFound, "no share %s/%s", peer, share)
@@ -2092,4 +2096,327 @@ func TestSelfMoveNormalizedSpellingRejected(t *testing.T) {
 	s := Spec{Op: "move", Src: Endpoint{Peer: self, Share: "d", Path: nfdDir}, Dst: Endpoint{Peer: self, Share: "d", Path: nfcDir + "/b"}}
 	_, err := r.m.Submit("o", s)
 	wantCode(t, err, vfs.CodeInvalidRequest)
+}
+
+// powerLoss models a power cut: the only log bytes that survive are those
+// covered by a completed sync, while source removals are already durable.
+type powerLoss struct {
+	mu    sync.Mutex
+	sizes map[string]int64
+	syncs int
+}
+
+func (r *rig) trackSyncs() *powerLoss {
+	p := &powerLoss{sizes: map[string]int64{}}
+	r.opts.syncFile = func(f *os.File) error {
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		st, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.syncs++
+		p.sizes[f.Name()] = st.Size()
+		return nil
+	}
+	return p
+}
+
+// cut drops everything in the job's logs that was never synced.
+func (p *powerLoss) cut(t *testing.T, jobDir string) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, name := range []string{"done.log", "renames.log"} {
+		path := filepath.Join(jobDir, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if err := os.Truncate(path, p.sizes[path]); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+var collisionNames = []struct{ name, first, second string }{
+	{"case", "A", "a"},
+	{"normalization", koreanNFD, koreanNFC},
+}
+
+// A power cut right after the first source was removed. If the log entry were
+// not durable by then, nothing would say the destination is this job's file
+// and the second item would overwrite the only copy.
+func TestPowerCutAfterSourceRemovalLosesNothing(t *testing.T) {
+	for _, c := range collisionNames {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			r.opts.GOOS = "darwin"
+			power := r.trackSyncs()
+			r.dstF = &apfsDest{LocalFS: r.dst}
+			r.tree(r.srcDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
+			f := newFault(r.src)
+			var once sync.Once
+			f.onRemove = func(p string) error {
+				var err error
+				once.Do(func() {
+					if rerr := os.Remove(filepath.Join(r.srcDir, p)); rerr != nil {
+						t.Error(rerr)
+					}
+					r.cancel()
+					err = vfs.E(vfs.CodeCanceled, "power cut")
+				})
+				return err
+			}
+			r.srcF = f
+			r.start()
+			s := cpSpec("move", "t", "")
+			s.OnConflict = ConflictOverwrite
+			id := r.submit(s)
+			r.waitStopped()
+			r.wantGone(r.srcDir, "t/"+c.first)
+			power.cut(t, filepath.Join(r.dir, "jobs", id))
+
+			r.srcF = r.src
+			r.start()
+			j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+			if j.State != StatePartial || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
+				t.Errorf("%+v", j)
+			}
+			r.wantFile(r.dstDir, "t/"+apfsName(c.first), "first")
+			r.wantFile(r.srcDir, "t/"+c.second, "second")
+		})
+	}
+}
+
+// renameCollisionDest is a same-share destination on a folding filesystem
+// whose source names were written elsewhere, so both spellings exist. It can
+// die right after a rename.
+type renameCollisionDest struct {
+	*apfsDest
+	once sync.Once
+	kill func()
+	err  error // if set, every Rename fails with it
+}
+
+func (d *renameCollisionDest) Rename(ctx context.Context, from, to string) error {
+	if d.err != nil {
+		return d.err
+	}
+	if err := d.LocalFS.Rename(ctx, from, apfsName(to)); err != nil {
+		return err
+	}
+	var ret error
+	d.once.Do(func() {
+		if d.kill != nil {
+			d.kill()
+			ret = vfs.E(vfs.CodeCanceled, "killed")
+		}
+	})
+	return ret
+}
+
+// Killed between a same-share rename and its log entry: the source is gone
+// and done.log knows nothing. The durable rename record must say whose file
+// the destination is, after a plain kill and after a power cut.
+func TestKillAfterItemRenameLosesNothing(t *testing.T) {
+	for _, c := range collisionNames {
+		for _, cut := range []bool{false, true} {
+			t.Run(c.name+"/powercut="+strconv.FormatBool(cut), func(t *testing.T) {
+				r := newRig(t)
+				r.opts.GOOS = "darwin"
+				power := r.trackSyncs()
+				r.tree(r.dstDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
+				if err := os.MkdirAll(filepath.Join(r.dstDir, "u/t"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				r.selfSrc = r.dst
+				r.dstF = &renameCollisionDest{apfsDest: &apfsDest{LocalFS: r.dst}, kill: func() { r.cancel() }}
+				r.start()
+				id := r.submit(sameShare("move", "t", "u", ConflictOverwrite))
+				r.waitStopped()
+				r.wantGone(r.dstDir, "t/"+c.first)
+				if cut {
+					power.cut(t, filepath.Join(r.dir, "jobs", id))
+				}
+
+				r.dstF = &renameCollisionDest{apfsDest: &apfsDest{LocalFS: r.dst}}
+				r.start()
+				j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+				if j.State != StatePartial || j.DoneFiles != 1 || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
+					t.Errorf("%+v", j)
+				}
+				r.wantFile(r.dstDir, "u/t/"+apfsName(c.first), "first")
+				r.wantFile(r.dstDir, "t/"+c.second, "second")
+			})
+		}
+	}
+}
+
+// The whole source vanished item by item and the logs hold only rename
+// records: the job finishes rather than failing not_found.
+func TestAllItemsRenamedThenKilledFinishes(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.dstDir, map[string]string{"t/a": "aa"})
+	if err := os.MkdirAll(filepath.Join(r.dstDir, "u/t"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.dstF = &renameKillDest{Dest: r.dst, kill: func() { r.cancel() }}
+	r.start()
+	id := r.submit(sameShare("move", "t", "u", ConflictFail))
+	r.waitStopped()
+	if err := os.Remove(filepath.Join(r.dstDir, "t")); err != nil {
+		t.Fatal(err)
+	}
+	r.dstF = r.dst
+	r.start()
+	j := r.waitDone(id)
+	if j.DoneFiles != 1 || j.DoneBytes != 2 || j.TotalFiles != 1 {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "u/t/a", "aa")
+}
+
+// A rename that failed left its record behind, and the source is still there:
+// the record means nothing and the item is processed normally.
+func TestRenameRecordWithSourcePresentIsIgnored(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.dstDir, map[string]string{"t/a": "aa", "u/t/a": "old"})
+	r.start()
+	id := r.submit(sameShare("move", "t", "u", ConflictFail))
+	j := waitState(t, r.m, id, StatePartial, StateDone)
+	if j.State != StatePartial || j.DoneFiles != 0 || j.Failures[0].Code != vfs.CodeConflict {
+		t.Fatalf("%+v", j)
+	}
+	if err := r.m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	j = waitState(t, r.m, id, StatePartial, StateDone)
+	if j.State != StatePartial || j.DoneFiles != 0 {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "t/a", "aa")
+	r.wantFile(r.dstDir, "u/t/a", "old")
+}
+
+// If the entry cannot be made durable the source must not go away, and a Retry
+// finishes the item.
+func TestLogSyncFailureKeepsSource(t *testing.T) {
+	r := newRig(t)
+	var broken atomic.Bool
+	broken.Store(true)
+	r.opts.syncFile = func(f *os.File) error {
+		if broken.Load() {
+			return vfs.E(vfs.CodeInternal, "sync failed")
+		}
+		return f.Sync()
+	}
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	f := newFault(r.src)
+	r.srcF = f
+	r.start()
+	id := r.submit(cpSpec("move", "f", "f"))
+	j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+	if j.State != StatePartial || j.DoneFiles != 0 || j.Failures[0].Code != vfs.CodeInternal {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.srcDir, "f", "data")
+	if n := countOf(f.callLog(), "remove f"); n != 0 {
+		t.Error("source removal attempted")
+	}
+	broken.Store(false)
+	if err := r.m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	r.waitDone(id)
+	r.wantGone(r.srcDir, "f")
+	r.wantFile(r.dstDir, "f", "data")
+}
+
+func TestRenameRecordSyncFailureKeepsSource(t *testing.T) {
+	r := newRig(t)
+	r.opts.syncFile = func(*os.File) error { return vfs.E(vfs.CodeInternal, "sync failed") }
+	r.tree(r.dstDir, map[string]string{"t/a": "aa"})
+	if err := os.MkdirAll(filepath.Join(r.dstDir, "u/t"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := newFault(r.dst)
+	r.dstF = faultDest{r.dst, f}
+	r.start()
+	id := r.submit(sameShare("move", "t", "u", ConflictFail))
+	j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+	if j.State != StatePartial || j.DoneFiles != 0 || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeInternal {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "t/a", "aa")
+	r.wantGone(r.dstDir, "u/t/a")
+	if n := countOf(f.callLog(), "rename t/a"); n != 0 {
+		t.Error("rename attempted without a durable record")
+	}
+}
+
+// A rename that fails for any reason but a taken name fails that item once.
+func TestItemRenameErrorFailsItemOnly(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.dstDir, map[string]string{"t/a": "aa"})
+	if err := os.MkdirAll(filepath.Join(r.dstDir, "u/t"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.selfSrc = r.dst
+	r.dstF = &renameCollisionDest{apfsDest: &apfsDest{LocalFS: r.dst}, err: vfs.E(vfs.CodeInternal, "no")}
+	r.start()
+	id := r.submit(sameShare("move", "t", "u", ConflictFail))
+	j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+	if j.State != StatePartial || j.FailedFiles != 1 || j.DoneFiles != 0 {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "t/a", "aa")
+	r.wantGone(r.dstDir, "u/t/a")
+}
+
+// A copy keeps its source, so a lost entry is found again by the crash rule
+// and the job spends no sync on it.
+func TestCopyDoesNotSyncLog(t *testing.T) {
+	r := newRig(t)
+	power := r.trackSyncs()
+	r.tree(r.srcDir, map[string]string{"f": "x"})
+	r.start()
+	r.waitDone(r.submit(cpSpec("copy", "f", "f")))
+	power.mu.Lock()
+	defer power.mu.Unlock()
+	if power.syncs != 0 {
+		t.Errorf("%d syncs", power.syncs)
+	}
+}
+
+// Every NFC and NFD spelling of a code point must share a key on darwin,
+// including those whose case mapping differs between the two forms.
+func TestDestKeyJoinsNormalizationForms(t *testing.T) {
+	darwin := &Manager{o: Options{GOOS: "darwin"}}
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue
+		}
+		s := string(r)
+		nfc, nfd := norm.NFC.String(s), norm.NFD.String(s)
+		if darwin.destKey(nfc) != darwin.destKey(nfd) {
+			t.Errorf("U+%04X: %q != %q", r, darwin.destKey(nfc), darwin.destKey(nfd))
+		}
+	}
+	if darwin.destKey("A") != darwin.destKey("a") {
+		t.Error("case not folded")
+	}
+	windows := &Manager{o: Options{GOOS: "windows"}}
+	if windows.destKey(koreanNFC) == windows.destKey(koreanNFD) {
+		t.Error("windows does not normalize")
+	}
+	if windows.destKey("A") != windows.destKey("a") {
+		t.Error("case not folded on windows")
+	}
+	linux := &Manager{o: Options{GOOS: "linux"}}
+	if linux.destKey("A") == linux.destKey("a") {
+		t.Error("linux keeps bytes")
+	}
 }
