@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"sugarintegration/internal/fsutil"
 )
 
 const (
@@ -64,7 +66,7 @@ func LoadOrCreate(dir string) (*Identity, error) {
 			return nil, err
 		}
 		keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-		if err := writeFile(keyPath, keyPEM); err != nil {
+		if err := fsutil.WriteAtomic(keyPath, keyPEM, 0o600); err != nil {
 			return nil, err
 		}
 	case err != nil:
@@ -81,7 +83,7 @@ func LoadOrCreate(dir string) (*Identity, error) {
 		// Key survived but certificate did not: reissue; the ID is unchanged.
 		certPEM, err = newCertPEM(priv)
 		if err == nil {
-			err = writeFile(certPath, certPEM)
+			err = fsutil.WriteAtomic(certPath, certPEM, 0o600)
 		}
 	}
 	if err != nil {
@@ -135,29 +137,4 @@ func newCertPEM(priv ed25519.PrivateKey) ([]byte, error) {
 		return nil, err
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
-}
-
-// writeFile writes data with mode 0600 via a temp file and rename.
-func writeFile(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil && !errors.Is(err, os.ErrInvalid) {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
 }

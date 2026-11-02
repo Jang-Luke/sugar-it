@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"sugarintegration/internal/mesh"
@@ -147,6 +148,48 @@ func TestControlTokenStable(t *testing.T) {
 		fi, _ := os.Stat(filepath.Join(dir, "control.token"))
 		if fi.Mode().Perm() != 0o600 {
 			t.Fatal(fi.Mode())
+		}
+	}
+}
+
+func TestControlTokenReplacesStaleEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "control.token")
+	os.WriteFile(p, nil, 0o600)
+	tok, err := ControlToken(dir)
+	if err != nil || len(tok) < 32 {
+		t.Fatalf("%q %v", tok, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != tok {
+		t.Fatal("file does not hold the token")
+	}
+	if again, _ := ControlToken(dir); again != tok {
+		t.Fatal("unstable")
+	}
+	if runtime.GOOS != "windows" {
+		if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+			t.Fatal(fi.Mode())
+		}
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("temp files left: %v", ents)
+	}
+}
+
+func TestControlTokenConcurrentCallersAgree(t *testing.T) {
+	dir := t.TempDir()
+	const n = 16
+	toks := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); toks[i], errs[i] = ControlToken(dir) }()
+	}
+	wg.Wait()
+	for i := range toks {
+		if errs[i] != nil || toks[i] == "" || toks[i] != toks[0] {
+			t.Fatalf("caller %d: %q %v (first %q)", i, toks[i], errs[i], toks[0])
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"sugarintegration/internal/fsutil"
 	"sugarintegration/internal/mesh"
 	"sugarintegration/internal/shares"
 )
@@ -104,7 +105,7 @@ func Open(dir string) (*Store, error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		s.cur = defaults()
-		if err := writeAtomic(path, mustJSON(s.cur), 0o600); err != nil {
+		if err := fsutil.WriteAtomic(path, mustJSON(s.cur), 0o600); err != nil {
 			return nil, err
 		}
 	case err != nil:
@@ -136,50 +137,75 @@ func (s *Store) Update(fn func(*Config) error) error {
 	if err := fn(&next); err != nil {
 		return err
 	}
-	if err := writeAtomic(filepath.Join(s.dir, configFile), mustJSON(next), 0o600); err != nil {
+	if err := fsutil.WriteAtomic(filepath.Join(s.dir, configFile), mustJSON(next), 0o600); err != nil {
 		return err
 	}
 	s.cur = next
 	return nil
 }
 
-// ControlToken returns the control API token, creating it (mode 0600) if absent.
+// ControlToken returns the control API token, creating it (mode 0600) if
+// absent. The token is written to a temp file and hard-linked into place, so a
+// reader never sees a partial file and concurrent callers agree on one token.
+// An empty file (left by a crash or an older version) is stale and replaced.
 func ControlToken(dir string) (string, error) {
 	path := filepath.Join(dir, tokenFile)
-	for range 3 {
-		if b, err := os.ReadFile(path); err == nil {
-			if t := strings.TrimSpace(string(b)); t != "" {
-				return t, nil
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", err
-		}
-		var raw [32]byte
-		if _, err := rand.Read(raw[:]); err != nil {
-			return "", err
-		}
-		tok := base64.RawURLEncoding.EncodeToString(raw[:])
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if errors.Is(err, os.ErrExist) {
-			continue // another process created it; read theirs
-		}
-		if err != nil {
-			return "", err
-		}
-		_, werr := f.WriteString(tok)
-		if cerr := f.Close(); werr == nil {
-			werr = cerr
-		}
-		if werr != nil {
-			os.Remove(path)
-			return "", werr
-		}
-		return tok, nil
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
 	}
-	return "", errors.New("config: could not read or create control token")
+	if tok, err := readToken(path); err != nil || tok != "" {
+		return tok, err
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	tok := base64.RawURLEncoding.EncodeToString(raw[:])
+	tmp, err := os.CreateTemp(dir, tokenFile+".tmp*") // mode 0600
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.WriteString(tok)
+	if serr := tmp.Sync(); werr == nil {
+		werr = serr
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return "", werr
+	}
+	for range 3 {
+		err := os.Link(tmp.Name(), path)
+		if err == nil {
+			return tok, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		existing, rerr := readToken(path)
+		if rerr != nil {
+			return "", rerr
+		}
+		if existing != "" {
+			return existing, nil // another caller won
+		}
+		// Stale empty file: replace it atomically.
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			return "", err
+		}
+		return readToken(path)
+	}
+	return "", errors.New("config: could not create control token")
+}
+
+func readToken(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	return strings.TrimSpace(string(b)), err
 }
 
 func mustJSON(c Config) []byte {
@@ -188,28 +214,4 @@ func mustJSON(c Config) []byte {
 		panic(err)
 	}
 	return append(b, '\n')
-}
-
-func writeAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(perm); err != nil && !errors.Is(err, os.ErrInvalid) {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
 }
