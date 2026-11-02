@@ -1746,3 +1746,229 @@ func TestSnapshotsDoNotAlias(t *testing.T) {
 func openRO(dir string) (*shares.LocalFS, error) {
 	return shares.Open(shares.Spec{Name: "ro", Path: dir, ReadOnly: true})
 }
+
+// foldDest behaves like a case-insensitive destination: names differing only
+// in case are the same file.
+type foldDest struct{ *shares.LocalFS }
+
+func fold(p string) string { return strings.ToLower(p) }
+
+func (d foldDest) Stat(ctx context.Context, p string) (vfs.Entry, error) {
+	return d.LocalFS.Stat(ctx, fold(p))
+}
+func (d foldDest) List(ctx context.Context, p string) ([]vfs.Entry, error) {
+	return d.LocalFS.List(ctx, fold(p))
+}
+func (d foldDest) Hash(ctx context.Context, p string) (string, error) {
+	return d.LocalFS.Hash(ctx, fold(p))
+}
+func (d foldDest) Mkdir(ctx context.Context, p string) error {
+	return d.LocalFS.Mkdir(ctx, fold(p))
+}
+func (d foldDest) Remove(ctx context.Context, p string, recursive bool) error {
+	return d.LocalFS.Remove(ctx, fold(p), recursive)
+}
+func (d foldDest) Rename(ctx context.Context, from, to string) error {
+	return d.LocalFS.Rename(ctx, fold(from), fold(to))
+}
+func (d foldDest) CommitPart(key, dst string, mt time.Time, mode uint32) error {
+	return d.LocalFS.CommitPart(key, fold(dst), mt, mode)
+}
+
+func TestCaseOnlyCollisionKeepsSecondSource(t *testing.T) {
+	for _, op := range []string{"move", "copy"} {
+		for _, c := range []Conflict{ConflictFail, ConflictSkip, ConflictOverwrite, ConflictRename} {
+			t.Run(op+"/"+string(c), func(t *testing.T) {
+				r := newRig(t)
+				r.opts.GOOS = "darwin"
+				r.dstF = foldDest{r.dst}
+				r.tree(r.srcDir, map[string]string{"t/A": "upper", "t/a": "lower", "t/z": "other"})
+				r.start()
+				s := cpSpec(op, "t", "")
+				s.OnConflict = c
+				id := r.submit(s)
+				check := func() {
+					t.Helper()
+					j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+					if j.State != StatePartial || j.DoneFiles != 2 || j.FailedFiles != 1 {
+						t.Fatalf("%+v", j)
+					}
+					if f := j.Failures[0]; f.Code != vfs.CodeConflict || f.Path != "t/a" {
+						t.Errorf("%+v", f)
+					}
+					r.wantFile(r.dstDir, "t/a", "upper")
+					r.wantFile(r.dstDir, "t/z", "other")
+					r.wantFile(r.srcDir, "t/a", "lower")
+					if ents, _ := os.ReadDir(filepath.Join(r.dstDir, "t")); len(ents) != 2 {
+						t.Errorf("destination: %v", ents)
+					}
+					if op == "move" {
+						r.wantGone(r.srcDir, "t/A")
+					} else {
+						r.wantFile(r.srcDir, "t/A", "upper")
+					}
+				}
+				check()
+				// The taken name is remembered across a Retry through done.log.
+				if err := r.m.Retry(id); err != nil {
+					t.Fatal(err)
+				}
+				check()
+			})
+		}
+	}
+}
+
+func TestCaseOnlyNamesBothArriveOnCaseSensitiveDest(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"t/A": "upper", "t/a": "lower"})
+	r.start()
+	j := r.waitDone(r.submit(cpSpec("move", "t", "")))
+	if j.DoneFiles != 2 {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "t/A", "upper")
+	r.wantFile(r.dstDir, "t/a", "lower")
+}
+
+// a/a into the root resolves to a: a/a/a/x would land on a/a/x, the job's own
+// source of a later item.
+func TestMoveIntoOwnParentKeepsOwnSources(t *testing.T) {
+	for _, op := range []string{"move", "copy"} {
+		for _, c := range []Conflict{ConflictOverwrite, ConflictFail, ConflictRename} {
+			t.Run(op+"/"+string(c), func(t *testing.T) {
+				r := newRig(t)
+				r.tree(r.dstDir, map[string]string{"a/a/x": "ORIGINAL-x", "a/a/a/x": "nested-x"})
+				r.start()
+				id := r.submit(sameShare(op, "a/a", "", c))
+				j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+				if j.State != StatePartial || j.FailedFiles != 1 || j.DoneFiles != 1 {
+					t.Fatalf("%+v", j)
+				}
+				if f := j.Failures[0]; f.Code != vfs.CodeConflict || f.Path != "a/a/a/x" {
+					t.Errorf("%+v", f)
+				}
+				r.wantFile(r.dstDir, "a/x", "ORIGINAL-x")
+				r.wantFile(r.dstDir, "a/a/a/x", "nested-x")
+				if op == "copy" {
+					r.wantFile(r.dstDir, "a/a/x", "ORIGINAL-x")
+				} else {
+					r.wantGone(r.dstDir, "a/a/x")
+				}
+				r.wantGone(r.dstDir, "a/a/x (1)")
+			})
+		}
+	}
+}
+
+// An empty directory that would land under the job's source fails too, and
+// stays where it is.
+func TestMoveIntoOwnParentKeepsEmptyDir(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.dstDir, map[string]string{"a/a/x": "x"})
+	if err := os.MkdirAll(filepath.Join(r.dstDir, "a/a/a/e"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.start()
+	id := r.submit(sameShare("move", "a/a", "", ConflictFail))
+	j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+	if j.State != StatePartial || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
+		t.Fatalf("%+v", j)
+	}
+	r.wantFile(r.dstDir, "a/x", "x")
+	if !r.exists(r.dstDir, "a/a/a/e") {
+		t.Error("empty source directory removed")
+	}
+	r.wantGone(r.dstDir, "a/a/e")
+}
+
+// An item logged before the rule existed is finished, not failed.
+func TestLoggedItemUnderSourceRootStaysDone(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.dstDir, map[string]string{"a/a/x": "x", "a/a/a/x": "n"})
+	r.start()
+	id := r.submit(sameShare("copy", "a/a", "", ConflictFail))
+	waitState(t, r.m, id, StatePartial)
+	lf, err := os.OpenFile(filepath.Join(r.dir, "jobs", id, "done.log"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lf.WriteString(`{"p":"a/x","d":"a/a/x","s":1}` + "\n")
+	lf.Close()
+	if err := r.m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	j := r.waitDone(id)
+	if j.DoneFiles != 2 || j.FailedFiles != 0 {
+		t.Errorf("%+v", j)
+	}
+}
+
+func TestActivePart(t *testing.T) {
+	r := newRig(t)
+	r.write(t, r.srcDir, "wait", randBytes(1<<20))
+	r.tree(r.srcDir, map[string]string{"ok": "x", "clash": "new", "full": "y"})
+	r.tree(r.dstDir, map[string]string{"clash": "old"})
+	f := newFault(r.src)
+	r.srcF = f
+	r.start()
+	if r.m.ActivePart("unknown") {
+		t.Error("unknown key is active")
+	}
+
+	done := r.submit(cpSpec("copy", "ok", "ok"))
+	r.waitDone(done)
+	if r.m.ActivePart(partKey(done, "")) {
+		t.Error("done job's part is active")
+	}
+
+	// A partial job's parts were removed and a Retry starts over.
+	f.setDrop(0)
+	f.dropCode = vfs.CodeInternal
+	partial := r.submit(cpSpec("copy", "full", "elsewhere"))
+	waitState(t, r.m, partial, StatePartial)
+	if r.m.ActivePart(partKey(partial, "")) {
+		t.Error("partial job's part is active")
+	}
+	f.setDrop(-1)
+	f.dropCode = ""
+
+	r.set(func() { r.dstF = failDest{LocalFS: r.dst, commitErr: vfs.E(vfs.CodeDiskFull, "full")} })
+	failed := r.submit(cpSpec("copy", "full", "full"))
+	waitState(t, r.m, failed, StateFailed)
+	if !r.m.ActivePart(partKey(failed, "")) {
+		t.Error("failed job's part must survive for Retry")
+	}
+	r.set(func() { r.dstF = r.dst })
+
+	f.setDrop(256 << 10)
+	waiting := r.submit(cpSpec("copy", "wait", "wait"))
+	waitState(t, r.m, waiting, StateWaitingPeer)
+	r.set(func() { r.down = true })
+	if !r.m.ActivePart(partKey(waiting, "")) {
+		t.Error("waiting job's part is active")
+	}
+
+	// A restart must still know the keys, before any attempt has run.
+	r.stop()
+	m, err := NewManager(r.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.ActivePart(partKey(waiting, "")) || !m.ActivePart(partKey(failed, "")) {
+		t.Error("keys lost across a restart")
+	}
+	if m.ActivePart(partKey(done, "")) || m.ActivePart(partKey(partial, "")) {
+		t.Error("finished jobs' keys active after a restart")
+	}
+
+	if err := m.Cancel(waiting); err != nil {
+		t.Fatal(err)
+	}
+	if m.ActivePart(partKey(waiting, "")) {
+		t.Error("canceled job's part is active")
+	}
+	if err := m.Cancel(failed); err == nil {
+		t.Error("failed job is not cancelable")
+	}
+}

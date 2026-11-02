@@ -66,7 +66,7 @@ func validate(s Spec, srcReadOnly, foldCase bool) error {
 	}
 	if s.Src.Peer == s.Dst.Peer && s.Src.Share == s.Dst.Share {
 		if foldCase {
-			from, to = strings.ToLower(from), strings.ToLower(to)
+			from, to = foldPath(from), foldPath(to)
 		}
 		if from == "" || to == from || strings.HasPrefix(to, from+"/") {
 			return vfs.E(vfs.CodeInvalidRequest, "cannot %s %q onto or into itself", s.Op, s.Src.Path)

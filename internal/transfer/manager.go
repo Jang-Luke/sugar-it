@@ -49,7 +49,8 @@ type jobState struct {
 	cancel     context.CancelFunc // set while an attempt runs
 	backoff    time.Duration
 	progressed bool
-	timerGen   int // invalidates a pending retry timer
+	timerGen   int             // invalidates a pending retry timer
+	partKeys   map[string]bool // parts.log in memory; nil until loaded
 }
 
 // Manager owns transfer jobs: their queue, persistence and recovery.
@@ -106,7 +107,11 @@ func NewManager(o Options) (*Manager, error) {
 			if js.State == StateRunning {
 				js.State = StateQueued
 			}
+			js.partKeys = m.loadPartKeys(js.ID)
 			m.enqueueLocked(js)
+		}
+		if js.State == StateFailed {
+			js.partKeys = m.loadPartKeys(r.ID)
 		}
 	}
 	return m, nil
@@ -243,6 +248,20 @@ func (m *Manager) Get(id string) (Job, error) {
 		return Job{}, vfs.E(vfs.CodeNotFound, "no job %q", id)
 	}
 	return js.Job.clone(), nil
+}
+
+// ActivePart reports whether key is a part file a job may still resume: one of
+// a job that has not finished or of a failed job, which Retry resumes. GCParts
+// must leave those alone.
+func (m *Manager) ActivePart(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, js := range m.jobs {
+		if js.partKeys[key] && (!js.State.terminal() || js.State == StateFailed) {
+			return true
+		}
+	}
+	return false
 }
 
 // Cancel stops a job and removes its part files. What was already moved stays
@@ -504,6 +523,14 @@ func (m *Manager) armRetryLocked(js *jobState) {
 	})
 }
 
+func (m *Manager) loadPartKeys(id string) map[string]bool {
+	keys := map[string]bool{}
+	for _, k := range readPartKeys(filepath.Join(m.jobDir(id), partsFile)) {
+		keys[k] = true
+	}
+	return keys
+}
+
 // removeParts deletes every part file the job may have left. Errors are left
 // for GCParts: there is nothing else to do with them.
 func (m *Manager) removeParts(js *jobState) {
@@ -530,7 +557,7 @@ type jobRun struct {
 	sameShare bool
 	log       *doneLog
 	done      map[string]doneEntry
-	partKeys  map[string]bool
+	taken     map[string]bool // case-folded destinations of this job; nil if case matters
 
 	made       map[string]bool // destination directories known to exist
 	failedDirs map[string]bool // source dirs with no destination: never removed
@@ -631,9 +658,15 @@ func (r *jobRun) run() (err error) {
 		return writeErr(err)
 	}
 	defer r.log.close()
-	r.partKeys = map[string]bool{}
-	for _, k := range readPartKeys(filepath.Join(dir, partsFile)) {
-		r.partKeys[k] = true
+	keys := m.loadPartKeys(js.ID)
+	m.mu.Lock()
+	js.partKeys = keys
+	m.mu.Unlock()
+	if m.foldCase() {
+		r.taken = make(map[string]bool, len(r.done))
+		for _, e := range r.done {
+			r.take(e.D)
+		}
 	}
 
 	for _, d := range pl.dirs {
@@ -765,6 +798,10 @@ func messageOf(err error) string {
 	return err.Error()
 }
 
+// foldPath maps paths that differ only by case to one key. Lowering alone
+// misses letters such as long s, which only meet their pair through upper case.
+func foldPath(p string) string { return strings.ToLower(strings.ToUpper(p)) }
+
 func parentOf(p string) string {
 	if i := strings.LastIndexByte(p, '/'); i >= 0 {
 		return p[:i]
@@ -833,7 +870,13 @@ func (r *jobRun) ensureDir(p string) error {
 // makeDir creates one walked directory. A non-empty directory that fails is
 // not itself an item: each file under it fails on its own.
 func (r *jobRun) makeDir(d planDir) error {
-	err := r.ensureDir(r.dstPath(d.rel))
+	dstP := r.dstPath(d.rel)
+	var err error
+	if r.inOwnSource(dstP) {
+		err = vfs.E(vfs.CodeConflict, "destination %q is inside this job's source", dstP)
+	} else {
+		err = r.ensureDir(dstP)
+	}
 	if err == nil {
 		return nil
 	}
@@ -844,6 +887,29 @@ func (r *jobRun) makeDir(d planDir) error {
 	return r.fail(r.srcPath(d.rel), err)
 }
 
+// inOwnSource reports whether p is at or under this job's source root. That
+// passes validation when the destination is an ancestor of the source: a/a
+// into the root resolves to a, and a/a/a/x then lands on a/a/x, the job's own
+// source of another item. No policy may write there.
+func (r *jobRun) inOwnSource(p string) bool {
+	if !r.sameShare {
+		return false
+	}
+	root := r.root
+	if r.m.foldCase() {
+		root, p = foldPath(root), foldPath(p)
+	}
+	return p == root || strings.HasPrefix(p, root+"/")
+}
+
+// take remembers a destination this job wrote, where names differing only by
+// case are one file and a second item must not replace it.
+func (r *jobRun) take(p string) {
+	if r.taken != nil {
+		r.taken[foldPath(p)] = true
+	}
+}
+
 // file transfers one file.
 func (r *jobRun) file(f planFile) error {
 	srcP, dstP := r.srcPath(f.rel), r.dstPath(f.rel)
@@ -852,6 +918,12 @@ func (r *jobRun) file(f planFile) error {
 	}
 	if err := r.checkDst(dstP); err != nil {
 		return r.fail(srcP, err)
+	}
+	if r.inOwnSource(dstP) {
+		return r.fail(srcP, vfs.E(vfs.CodeConflict, "destination %q is inside this job's source", dstP))
+	}
+	if r.taken[foldPath(dstP)] {
+		return r.fail(srcP, vfs.E(vfs.CodeConflict, "destination %q differs only by case from a file this job already wrote", dstP))
 	}
 	if err := r.ensureDir(parentOf(dstP)); err != nil {
 		return r.fail(srcP, err)
@@ -864,6 +936,7 @@ func (r *jobRun) file(f planFile) error {
 		}
 		if found {
 			r.dst.RemovePart(key) // a commit can die before clearing the etag
+			r.take(e.D)
 			return r.commitDone(f, e, 0)
 		}
 	}
@@ -887,6 +960,7 @@ func (r *jobRun) renameFile(f planFile, srcP, dstP string) (bool, error) {
 	if err != nil {
 		return false, r.fail(srcP, err)
 	}
+	r.take(dstP)
 	r.addDone(f, f.size, 0)
 	// The source is gone, so a lost entry costs nothing.
 	if err := r.log.append(doneEntry{P: f.rel, D: dstP, S: f.size}); err != nil && shares.IsDiskFull(err) {
@@ -908,11 +982,16 @@ func (r *jobRun) addDone(f planFile, size, held int64) {
 
 func (r *jobRun) fetch(f planFile, srcP, dstP, key string) error {
 	m, js := r.m, r.js
-	if !r.partKeys[key] {
+	m.mu.Lock()
+	known := js.partKeys[key]
+	m.mu.Unlock()
+	if !known {
 		if err := appendPartKey(filepath.Join(m.jobDir(js.ID), partsFile), key); err != nil {
 			return r.fail(srcP, writeErr(err))
 		}
-		r.partKeys[key] = true
+		m.mu.Lock()
+		js.partKeys[key] = true
+		m.mu.Unlock()
 	}
 	held := int64(0)
 	res, err := Fetch(r.ctx, r.src, srcP, r.dst, dstP, key, js.Spec.OnConflict, m.o.GOOS, func(d int64) {
@@ -938,6 +1017,7 @@ func (r *jobRun) fetch(f planFile, srcP, dstP, key string) error {
 		}
 		return nil
 	}
+	r.take(res.Dst)
 	de, err := r.dst.Stat(r.ctx, res.Dst)
 	if err != nil {
 		return r.fail(srcP, err)
