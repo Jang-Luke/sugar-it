@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"time"
 
 	"sugarintegration/internal/fsutil"
@@ -126,14 +128,26 @@ func openDoneLog(path string, sync func(*os.File) error) (*doneLog, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Terminate a torn last line so the next entry does not join it.
-	if st, err := f.Stat(); err == nil && st.Size() > 0 {
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.Size() > 0 {
+		// Terminate a torn last line so the next entry does not join it.
 		last := make([]byte, 1)
 		if _, err := f.ReadAt(last, st.Size()-1); err != nil || last[0] != '\n' {
 			if _, err := f.Write([]byte("\n")); err != nil {
 				f.Close()
 				return nil, err
 			}
+		}
+		// Anything here may have been written and never synced: an earlier
+		// process can die, or its sync fail, between the two. An entry is
+		// visible before it is durable, so make it durable before trusting it.
+		if err := sync(f); err != nil {
+			f.Close()
+			return nil, err
 		}
 	}
 	return &doneLog{f, sync}, nil
@@ -157,13 +171,23 @@ func (l *doneLog) appendDurable(e doneEntry) error {
 
 func (l *doneLog) close() { l.f.Close() }
 
-// syncDir makes a newly created file's name durable. Best effort: Windows
-// cannot sync a directory and makes its metadata durable another way.
-func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
+// syncDir makes the names in dir durable, so a log file's name survives with
+// its contents. Windows cannot sync a directory, and network and FAT-style
+// mounts report EINVAL or ENOTSUP; neither is an error.
+func syncDir(dir string, sync func(*os.File) error) error {
+	if runtime.GOOS == "windows" {
+		return nil
 	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	err = sync(d)
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+		return nil
+	}
+	return err
 }
 
 // appendPartKey notes that key may hold a part file, so Cancel can find it

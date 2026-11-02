@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -107,8 +109,9 @@ func (r *rig) start() *Manager {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- m.Run(ctx) }()
+	// Set first: a recovered job can reach a test hook as soon as Run starts.
 	r.m, r.cancel, r.done = m, cancel, done
+	go func() { done <- m.Run(ctx) }()
 	return m
 }
 
@@ -2312,7 +2315,7 @@ func TestLogSyncFailureKeepsSource(t *testing.T) {
 	var broken atomic.Bool
 	broken.Store(true)
 	r.opts.syncFile = func(f *os.File) error {
-		if broken.Load() {
+		if broken.Load() && filepath.Base(f.Name()) == "done.log" {
 			return vfs.E(vfs.CodeInternal, "sync failed")
 		}
 		return f.Sync()
@@ -2341,7 +2344,12 @@ func TestLogSyncFailureKeepsSource(t *testing.T) {
 
 func TestRenameRecordSyncFailureKeepsSource(t *testing.T) {
 	r := newRig(t)
-	r.opts.syncFile = func(*os.File) error { return vfs.E(vfs.CodeInternal, "sync failed") }
+	r.opts.syncFile = func(f *os.File) error {
+		if filepath.Base(f.Name()) == "renames.log" {
+			return vfs.E(vfs.CodeInternal, "sync failed")
+		}
+		return f.Sync()
+	}
 	r.tree(r.dstDir, map[string]string{"t/a": "aa"})
 	if err := os.MkdirAll(filepath.Join(r.dstDir, "u/t"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2486,5 +2494,163 @@ func TestUnsyncedCommitKeepsSourceUntilDurable(t *testing.T) {
 	defer d.mu.Unlock()
 	if len(d.synced) != 2 || d.synced[1] != "f" {
 		t.Errorf("synced %q", d.synced)
+	}
+}
+
+// Killed between writing a done.log entry and syncing it: the entry is visible
+// but not durable. The restart must make it durable before trusting it, or a
+// power cut after the source removal leaves nothing to say whose file it is.
+func TestKilledBeforeLogSyncThenPowerCut(t *testing.T) {
+	for _, c := range collisionNames {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			r.opts.GOOS = "darwin"
+			r.dstF = &apfsDest{LocalFS: r.dst}
+			r.tree(r.srcDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
+			s := cpSpec("move", "t", "")
+			s.OnConflict = ConflictOverwrite
+
+			r.opts.syncFile = func(f *os.File) error {
+				if filepath.Base(f.Name()) == "done.log" {
+					r.cancel()
+					return vfs.E(vfs.CodeCanceled, "killed")
+				}
+				return f.Sync()
+			}
+			r.start()
+			id := r.submit(s)
+			r.waitStopped()
+			if r.doneLogLines(id) != 1 {
+				t.Fatalf("done.log: %d entries", r.doneLogLines(id))
+			}
+			r.wantFile(r.srcDir, "t/"+c.first, "first")
+
+			// The restart removes the first source; the power then goes.
+			power := r.trackSyncs()
+			logPath := filepath.Join(r.dir, "jobs", id, "done.log")
+			f := newFault(r.src)
+			var once sync.Once
+			f.onRemove = func(p string) error {
+				var err error
+				once.Do(func() {
+					st, serr := os.Stat(logPath)
+					if serr != nil {
+						t.Error(serr)
+					}
+					power.mu.Lock()
+					covered := power.sizes[logPath]
+					power.mu.Unlock()
+					if covered != st.Size() {
+						t.Errorf("source goes with %d of %d log bytes synced", covered, st.Size())
+					}
+					if rerr := os.Remove(filepath.Join(r.srcDir, p)); rerr != nil {
+						t.Error(rerr)
+					}
+					r.cancel()
+					err = vfs.E(vfs.CodeCanceled, "power cut")
+				})
+				return err
+			}
+			r.srcF = f
+			r.start()
+			r.waitStopped()
+			r.wantGone(r.srcDir, "t/"+c.first)
+			power.cut(t, filepath.Join(r.dir, "jobs", id))
+
+			r.srcF = r.src
+			r.start()
+			j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+			if j.State != StatePartial || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
+				t.Errorf("%+v", j)
+			}
+			r.wantFile(r.dstDir, "t/"+apfsName(c.first), "first")
+			r.wantFile(r.srcDir, "t/"+c.second, "second")
+		})
+	}
+}
+
+// With done.log sync always failing, no number of Retries may remove the
+// source: a visible entry is not a durable one.
+func TestLogSyncAlwaysFailingNeverRemovesSource(t *testing.T) {
+	r := newRig(t)
+	var broken atomic.Bool
+	broken.Store(true)
+	r.opts.syncFile = func(f *os.File) error {
+		if broken.Load() && filepath.Base(f.Name()) == "done.log" {
+			return vfs.E(vfs.CodeInternal, "sync failed")
+		}
+		return f.Sync()
+	}
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	f := newFault(r.src)
+	r.srcF = f
+	r.start()
+	id := r.submit(cpSpec("move", "f", "f"))
+	waitState(t, r.m, id, StatePartial)
+	for range 2 {
+		if err := r.m.Retry(id); err != nil {
+			t.Fatal(err)
+		}
+		j := waitState(t, r.m, id, StateFailed, StatePartial, StateDone)
+		if j.State != StateFailed || j.Error == nil || j.Error.Code != vfs.CodeInternal {
+			t.Errorf("%+v", j)
+		}
+		r.wantFile(r.srcDir, "f", "data")
+		if n := countOf(f.callLog(), "remove f"); n != 0 {
+			t.Fatal("source removal attempted on an unsynced entry")
+		}
+	}
+	broken.Store(false)
+	if err := r.m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	r.waitDone(id)
+	r.wantGone(r.srcDir, "f")
+	r.wantFile(r.dstDir, "f", "data")
+}
+
+// done.log's own name must be durable before a source may go.
+func TestJobDirSyncFailureKeepsSource(t *testing.T) {
+	r := newRig(t)
+	r.opts.syncFile = func(f *os.File) error {
+		if st, err := f.Stat(); err == nil && st.IsDir() {
+			return &os.PathError{Op: "sync", Path: f.Name(), Err: syscall.EIO}
+		}
+		return f.Sync()
+	}
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	f := newFault(r.src)
+	r.srcF = f
+	r.start()
+	id := r.submit(cpSpec("move", "f", "f"))
+	j := waitState(t, r.m, id, StateFailed, StatePartial, StateDone)
+	if j.State != StateFailed || j.Error == nil || j.Error.Code != vfs.CodeInternal {
+		t.Errorf("%+v", j)
+	}
+	r.wantFile(r.srcDir, "f", "data")
+	if n := countOf(f.callLog(), "remove f"); n != 0 {
+		t.Error("source removal attempted")
+	}
+}
+
+func TestJobDirSyncUnsupportedIsNoOp(t *testing.T) {
+	for _, unsupported := range []error{syscall.EINVAL, syscall.ENOTSUP} {
+		r := newRig(t)
+		calls := atomic.Int64{}
+		r.opts.syncFile = func(f *os.File) error {
+			if st, err := f.Stat(); err == nil && st.IsDir() {
+				calls.Add(1)
+				return &os.PathError{Op: "sync", Path: f.Name(), Err: unsupported}
+			}
+			return f.Sync()
+		}
+		r.tree(r.srcDir, map[string]string{"f": "data"})
+		r.start()
+		r.waitDone(r.submit(cpSpec("move", "f", "f")))
+		r.wantGone(r.srcDir, "f")
+		if runtime.GOOS != "windows" && calls.Load() == 0 {
+			t.Errorf("%v: directory sync never tried", unsupported)
+		}
+		r.stop()
 	}
 }

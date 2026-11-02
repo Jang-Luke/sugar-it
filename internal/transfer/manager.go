@@ -685,8 +685,12 @@ func (r *jobRun) run() (err error) {
 		defer r.renames.close()
 	}
 	if spec.Op == "move" {
-		syncDir(dir)
-		syncDir(filepath.Dir(dir))
+		// Before any source can go: done.log's name must be durable too.
+		for _, d := range []string{dir, filepath.Dir(dir)} {
+			if err := syncDir(d, m.o.syncFile); err != nil {
+				return writeErr(err)
+			}
+		}
 	}
 	if err := r.adoptRenames(pl, renameRecords); err != nil {
 		return err
