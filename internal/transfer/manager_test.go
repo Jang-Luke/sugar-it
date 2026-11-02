@@ -1531,19 +1531,30 @@ func TestCancelSurvivesKill(t *testing.T) {
 	r.wantGone(r.dstDir, "big")
 }
 
-// slowFS measures how many streams are open at once.
+// slowFS measures how many streams are open at once. Streams wait until a
+// second one has arrived, so jobs that can overlap always do, however the
+// scheduler happens to time them; only serial execution reaches the deadline.
 type slowFS struct {
 	vfs.FS
 	mu       sync.Mutex
 	cur, max int
+	met      chan struct{}
+	once     sync.Once
 }
 
 func (s *slowFS) Open(ctx context.Context, p string, off int64, etag string) (io.ReadCloser, vfs.Entry, error) {
 	s.mu.Lock()
 	s.cur++
 	s.max = max(s.max, s.cur)
+	if s.cur >= 2 {
+		s.once.Do(func() { close(s.met) })
+	}
 	s.mu.Unlock()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-s.met:
+		time.Sleep(20 * time.Millisecond) // room for a third, if one is allowed
+	case <-time.After(waitTime / 2):
+	}
 	s.mu.Lock()
 	s.cur--
 	s.mu.Unlock()
@@ -1557,7 +1568,7 @@ func TestConcurrencyLimit(t *testing.T) {
 		files[n] = n
 	}
 	r.tree(r.srcDir, files)
-	s := &slowFS{FS: r.src}
+	s := &slowFS{FS: r.src, met: make(chan struct{})}
 	r.srcF = s
 	r.start()
 	var ids []string
