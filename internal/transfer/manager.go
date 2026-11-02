@@ -1000,6 +1000,10 @@ func (r *jobRun) file(f planFile) error {
 			return r.fail(srcP, err)
 		}
 		if found {
+			// The commit may have died, or failed, before its directory sync.
+			if err := r.dst.SyncParent(e.D); err != nil {
+				return r.fail(srcP, err)
+			}
 			r.dst.RemovePart(key) // a commit can die before clearing the etag
 			r.take(e.D)
 			return r.commitDone(f, e, 0)

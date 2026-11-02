@@ -20,6 +20,7 @@ type Dest interface {
 	ResetPart(key string) error
 	RemovePart(key string) error
 	CommitPart(key, dst string, mtime time.Time, mode uint32) error
+	SyncParent(p string) error
 }
 
 // Conflict is the policy applied when the destination name is taken.

@@ -431,3 +431,168 @@ func TestIsDiskFull(t *testing.T) {
 		t.Fatal("false positive")
 	}
 }
+
+// recordDirSyncs makes l report each directory sync, and the state of the
+// world at that moment, to fn; fn's result is what the sync returns.
+func recordDirSyncs(l *LocalFS, fn func(dir string) error) { l.syncDir = fn }
+
+func TestCommitPartSyncsParentAfterRename(t *testing.T) {
+	for _, c := range []struct{ dst, parent string }{{"f", "."}, {"sub/deep/f", "sub/deep"}} {
+		t.Run(c.dst, func(t *testing.T) {
+			dir := t.TempDir()
+			l, err := Open(Spec{Name: "s", Path: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			if err := os.MkdirAll(filepath.Join(dir, "sub/deep"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f, _, err := l.OpenPart("k")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.WriteString("data")
+			f.Close()
+			var synced []string
+			recordDirSyncs(l, func(d string) error {
+				synced = append(synced, d)
+				if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(c.dst))); err != nil {
+					t.Errorf("synced %q before the rename: %v", d, err)
+				}
+				return nil
+			})
+			if err := l.CommitPart("k", c.dst, time.Now(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if len(synced) != 1 || synced[0] != c.parent {
+				t.Errorf("synced %q, want [%q]", synced, c.parent)
+			}
+		})
+	}
+}
+
+// The documented state after a failed sync: the file is at its destination,
+// complete, and the part and etag are gone, but it is not known to be durable.
+func TestCommitPartSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(Spec{Name: "s", Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	f, _, err := l.OpenPart("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("data")
+	f.Close()
+	if err := l.SetPartETag("k", "e"); err != nil {
+		t.Fatal(err)
+	}
+	recordDirSyncs(l, func(string) error { return errors.New("dir sync failed") })
+	err = l.CommitPart("k", "f", time.Now(), 0o644)
+	if vfs.CodeOf(err) != vfs.CodeInternal {
+		t.Fatalf("got %v, want internal", err)
+	}
+	if b, rerr := os.ReadFile(filepath.Join(dir, "f")); rerr != nil || string(b) != "data" {
+		t.Errorf("destination: %q, %v", b, rerr)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(dir, vfs.PartDir)); len(ents) != 0 {
+		t.Errorf("part dir: %v", ents)
+	}
+	recordDirSyncs(l, func(string) error { return diskFullErrno })
+	f, _, _ = l.OpenPart("k")
+	f.Close()
+	if vfs.CodeOf(l.CommitPart("k", "g", time.Now(), 0o644)) != vfs.CodeDiskFull {
+		t.Error("ENOSPC from the sync must be disk_full")
+	}
+}
+
+func TestPutSyncsParent(t *testing.T) {
+	for _, overwrite := range []bool{false, true} {
+		dir := t.TempDir()
+		l, err := Open(Spec{Name: "s", Path: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var synced []string
+		recordDirSyncs(l, func(d string) error {
+			synced = append(synced, d)
+			if _, err := os.Stat(filepath.Join(dir, "sub/f")); err != nil {
+				t.Errorf("synced before the rename: %v", err)
+			}
+			return nil
+		})
+		o := vfs.PutOptions{Overwrite: overwrite}
+		if _, err := l.Put(context.Background(), "sub/f", strings.NewReader("x"), o); err != nil {
+			t.Fatal(err)
+		}
+		if len(synced) != 1 || synced[0] != "sub" {
+			t.Errorf("overwrite=%v: synced %q", overwrite, synced)
+		}
+		recordDirSyncs(l, func(string) error { return errors.New("dir sync failed") })
+		o.Overwrite = true
+		if _, err := l.Put(context.Background(), "sub/f", strings.NewReader("y"), o); vfs.CodeOf(err) != vfs.CodeInternal {
+			t.Errorf("got %v, want internal", err)
+		}
+		if b, _ := os.ReadFile(filepath.Join(dir, "sub/f")); string(b) != "y" {
+			t.Errorf("destination %q: the file stays in place on a sync failure", b)
+		}
+	}
+}
+
+// A file's parent must itself be durable, or syncing it saves nothing.
+func TestMkdirSyncsParent(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(Spec{Name: "s", Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var synced []string
+	recordDirSyncs(l, func(d string) error { synced = append(synced, d); return nil })
+	if err := l.Mkdir(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Mkdir(context.Background(), "a/b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 2 || synced[0] != "." || synced[1] != "a" {
+		t.Errorf("synced %q", synced)
+	}
+	recordDirSyncs(l, func(string) error { return errors.New("dir sync failed") })
+	if vfs.CodeOf(l.Mkdir(context.Background(), "c")) != vfs.CodeInternal {
+		t.Error("sync failure not returned")
+	}
+}
+
+func TestSyncParentStaysInShare(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(Spec{Name: "s", Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "out")); err != nil {
+		t.Skip(err)
+	}
+	var synced []string
+	recordDirSyncs(l, func(d string) error { synced = append(synced, d); return nil })
+	if vfs.CodeOf(l.SyncParent("out/f")) != vfs.CodeInvalidPath {
+		t.Error("synced through a link")
+	}
+	if vfs.CodeOf(l.SyncParent("../f")) != vfs.CodeInvalidPath {
+		t.Error("synced outside the share")
+	}
+	if len(synced) != 0 {
+		t.Errorf("synced %q", synced)
+	}
+	if err := l.SyncParent("f"); err != nil || len(synced) != 1 || synced[0] != "." {
+		t.Errorf("%v, %q", err, synced)
+	}
+}

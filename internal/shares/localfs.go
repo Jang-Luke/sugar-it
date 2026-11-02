@@ -27,6 +27,7 @@ type Spec struct {
 type LocalFS struct {
 	root     *os.Root
 	readOnly bool
+	syncDir  func(dir string) error // default syncDirIn; tests observe it
 }
 
 var _ vfs.FS = (*LocalFS)(nil)
@@ -41,7 +42,27 @@ func Open(s Spec) (*LocalFS, error) {
 		r.Close()
 		return nil, vfs.E(vfs.CodeInvalidPath, "share path is not a directory")
 	}
-	return &LocalFS{root: r, readOnly: s.ReadOnly}, nil
+	l := &LocalFS{root: r, readOnly: s.ReadOnly}
+	l.syncDir = func(dir string) error { return syncDirIn(r, dir) }
+	return l, nil
+}
+
+// SyncParent makes the name p in its directory durable: a rename or a new file
+// is not committed until its directory has been synced. A no-op on Windows.
+func (l *LocalFS) SyncParent(p string) error {
+	c, err := l.cleanPath(p)
+	if err != nil {
+		return err
+	}
+	return l.syncParent(c)
+}
+
+func (l *LocalFS) syncParent(clean string) error {
+	dir := "."
+	if i := strings.LastIndexByte(clean, '/'); i >= 0 {
+		dir = clean[:i]
+	}
+	return mapErr(l.syncDir(dir))
 }
 
 func (l *LocalFS) Close() error   { return l.root.Close() }
@@ -427,6 +448,10 @@ func (l *LocalFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptio
 		}
 	}
 	committed = true
+	// On failure the new file stays at p, complete but not known to be durable.
+	if err := l.syncParent(c); err != nil {
+		return vfs.Entry{}, err
+	}
 	fi, err := l.lstat(c)
 	if err != nil {
 		return vfs.Entry{}, err
@@ -448,7 +473,10 @@ func (l *LocalFS) Mkdir(ctx context.Context, p string) error {
 	if err := ctxErr(ctx); err != nil {
 		return err
 	}
-	return mapErr(l.root.Mkdir(c, 0o777))
+	if err := l.root.Mkdir(c, 0o777); err != nil {
+		return mapErr(err)
+	}
+	return l.syncParent(c)
 }
 
 func (l *LocalFS) Remove(ctx context.Context, p string, recursive bool) error {

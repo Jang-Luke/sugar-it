@@ -125,7 +125,11 @@ func (l *LocalFS) RemovePart(key string) error {
 
 // CommitPart fsyncs the partial file, applies mode and mtime, and atomically
 // renames it to dst, replacing a regular file already there (conflict policy
-// is the caller's). The part and its etag are gone afterwards.
+// is the caller's). The part and its etag are gone afterwards, and the new name
+// is durable. If syncing the directory fails, the error is returned with the
+// complete file already at dst and the part and etag gone, but the name not
+// known to be durable: the caller must not treat it as committed, and can
+// finish with SyncParent.
 func (l *LocalFS) CommitPart(key, dst string, mtime time.Time, mode uint32) error {
 	if err := checkKey(key); err != nil {
 		return err
@@ -164,8 +168,12 @@ func (l *LocalFS) CommitPart(key, dst string, mtime time.Time, mode uint32) erro
 	if err := l.root.Rename(pp, d); err != nil {
 		return mapErr(err)
 	}
-	if err := l.root.Remove(partPath(key, etagExt)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return mapErr(err)
+	etagErr := l.root.Remove(partPath(key, etagExt))
+	if err := l.syncParent(d); err != nil {
+		return err
+	}
+	if etagErr != nil && !errors.Is(etagErr, fs.ErrNotExist) {
+		return mapErr(etagErr)
 	}
 	return nil
 }

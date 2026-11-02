@@ -1781,6 +1781,8 @@ func (d foldDest) CommitPart(key, dst string, mt time.Time, mode uint32) error {
 	return d.LocalFS.CommitPart(key, fold(dst), mt, mode)
 }
 
+func (d foldDest) SyncParent(p string) error { return d.LocalFS.SyncParent(fold(p)) }
+
 func TestCaseOnlyCollisionKeepsSecondSource(t *testing.T) {
 	for _, op := range []string{"move", "copy"} {
 		for _, c := range []Conflict{ConflictFail, ConflictSkip, ConflictOverwrite, ConflictRename} {
@@ -2013,6 +2015,8 @@ func (d *apfsDest) CommitPart(key, dst string, mt time.Time, mode uint32) error 
 	d.mu.Unlock()
 	return d.LocalFS.CommitPart(key, apfsName(dst), mt, mode)
 }
+
+func (d *apfsDest) SyncParent(p string) error { return d.LocalFS.SyncParent(apfsName(p)) }
 
 var (
 	koreanNFC = norm.NFC.String("한글.txt")
@@ -2418,5 +2422,69 @@ func TestDestKeyJoinsNormalizationForms(t *testing.T) {
 	linux := &Manager{o: Options{GOOS: "linux"}}
 	if linux.destKey("A") == linux.destKey("a") {
 		t.Error("linux keeps bytes")
+	}
+}
+
+// syncFailDest is a destination whose directory syncs fail while broken is set.
+type syncFailDest struct {
+	Dest
+	broken atomic.Bool
+	mu     sync.Mutex
+	synced []string
+}
+
+func (d *syncFailDest) SyncParent(p string) error {
+	d.mu.Lock()
+	d.synced = append(d.synced, p)
+	d.mu.Unlock()
+	if d.broken.Load() {
+		return vfs.E(vfs.CodeInternal, "sync failed")
+	}
+	return d.Dest.SyncParent(p)
+}
+
+// CommitPart's directory sync failed, so the file is at the destination but not
+// known durable. A move keeps its source, and a later attempt that finds the
+// file must make it durable before it may delete the source.
+func TestUnsyncedCommitKeepsSourceUntilDurable(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	d := &syncFailDest{Dest: &hookDest{Dest: r.dst, err: vfs.E(vfs.CodeInternal, "dir sync failed"), afterCommit: func() {}}}
+	d.broken.Store(true)
+	r.dstF = d
+	f := newFault(r.src)
+	r.srcF = f
+	r.start()
+	id := r.submit(cpSpec("move", "f", "f"))
+	j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+	if j.State != StatePartial || j.DoneFiles != 0 || j.Failures[0].Code != vfs.CodeInternal {
+		t.Fatalf("%+v", j)
+	}
+	r.wantFile(r.srcDir, "f", "data")
+	r.wantFile(r.dstDir, "f", "data")
+
+	if err := r.m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	j = waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+	if j.State != StatePartial || j.Failures[0].Code != vfs.CodeInternal {
+		t.Fatalf("still unsynced: %+v", j)
+	}
+	r.wantFile(r.srcDir, "f", "data")
+	if n := countOf(f.callLog(), "remove f"); n != 0 {
+		t.Error("source removal attempted on an unsynced file")
+	}
+
+	d.broken.Store(false)
+	if err := r.m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	r.waitDone(id)
+	r.wantGone(r.srcDir, "f")
+	r.wantFile(r.dstDir, "f", "data")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.synced) != 2 || d.synced[1] != "f" {
+		t.Errorf("synced %q", d.synced)
 	}
 }
