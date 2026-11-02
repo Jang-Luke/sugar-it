@@ -23,23 +23,78 @@ type faultFS struct {
 	hook      func()
 	hash      string
 	offsets   []int64
+	dropCode  string // error code of a drop; default peer_offline
+	hookPath  string // if set, hook only fires on streams of this path
+	opened    []string
+	calls     []string             // "open p", "hash p", "remove p", "rename p"
+	onRemove  func(p string) error // if set and non-nil result, Remove fails with it
+}
+
+func (f *faultFS) record(op, p string) {
+	f.mu.Lock()
+	f.calls = append(f.calls, op+" "+p)
+	f.mu.Unlock()
+}
+
+// callLog returns a copy of the recorded calls.
+func (f *faultFS) callLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+// openedPaths returns a copy of the paths passed to Open.
+func (f *faultFS) openedPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.opened...)
+}
+
+func (f *faultFS) setDrop(n int64) {
+	f.mu.Lock()
+	f.dropAfter = n
+	f.mu.Unlock()
+}
+
+func (f *faultFS) Remove(ctx context.Context, p string, recursive bool) error {
+	f.record("remove", p)
+	f.mu.Lock()
+	on := f.onRemove
+	f.mu.Unlock()
+	if on != nil {
+		if err := on(p); err != nil {
+			return err
+		}
+	}
+	return f.FS.Remove(ctx, p, recursive)
+}
+
+func (f *faultFS) Rename(ctx context.Context, from, to string) error {
+	f.record("rename", from)
+	return f.FS.Rename(ctx, from, to)
 }
 
 func newFault(inner vfs.FS) *faultFS { return &faultFS{FS: inner, dropAfter: -1, hookAt: -1} }
 
 func (f *faultFS) Open(ctx context.Context, p string, off int64, etag string) (io.ReadCloser, vfs.Entry, error) {
+	f.record("open", p)
 	rc, e, err := f.FS.Open(ctx, p, off, etag)
 	if err != nil {
 		return nil, e, err
 	}
 	f.mu.Lock()
 	f.offsets = append(f.offsets, off)
+	f.opened = append(f.opened, p)
 	drop, hookAt, hook := f.dropAfter, f.hookAt, f.hook
+	if f.hookPath != "" && f.hookPath != p {
+		hookAt, hook = -1, nil
+	}
 	f.mu.Unlock()
-	return &faultReader{rc: rc, drop: drop, hookAt: hookAt, hook: hook}, e, nil
+	return &faultReader{rc: rc, drop: drop, dropCode: f.dropCode, hookAt: hookAt, hook: hook}, e, nil
 }
 
 func (f *faultFS) Hash(ctx context.Context, p string) (string, error) {
+	f.record("hash", p)
 	if f.hash != "" {
 		return f.hash, nil
 	}
@@ -47,12 +102,13 @@ func (f *faultFS) Hash(ctx context.Context, p string) (string, error) {
 }
 
 type faultReader struct {
-	rc     io.ReadCloser
-	drop   int64
-	hookAt int64
-	hook   func()
-	n      int64
-	hooked bool
+	rc       io.ReadCloser
+	drop     int64
+	dropCode string
+	hookAt   int64
+	hook     func()
+	n        int64
+	hooked   bool
 }
 
 func (r *faultReader) Read(b []byte) (int, error) {
@@ -62,7 +118,11 @@ func (r *faultReader) Read(b []byte) (int, error) {
 	}
 	if r.drop >= 0 {
 		if r.n >= r.drop {
-			return 0, vfs.E(vfs.CodePeerOffline, "connection dropped")
+			code := r.dropCode
+			if code == "" {
+				code = vfs.CodePeerOffline
+			}
+			return 0, vfs.E(code, "connection dropped")
 		}
 		if rem := r.drop - r.n; int64(len(b)) > rem {
 			b = b[:rem]

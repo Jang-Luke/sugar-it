@@ -14,7 +14,10 @@ import (
 	"sugarintegration/internal/vfs"
 )
 
-const copyBuf = 256 << 10
+const (
+	copyBuf      = 256 << 10
+	maxNameTries = 10000
+)
 
 // Fetch copies one regular file from src to dst, following spec section 7:
 // stat, conflict check, resume-or-restart, stream, fsync, verify the hash and
@@ -112,7 +115,7 @@ func Fetch(ctx context.Context, src vfs.FS, srcPath string, dst Dest, dstPath, p
 	if err := dst.CommitPart(partKey, final, entry.ModTime, entry.Mode); err != nil {
 		return FetchResult{}, err
 	}
-	return FetchResult{Dst: final}, nil
+	return FetchResult{Dst: final, SrcETag: entry.ETag}, nil
 }
 
 // resolveDest applies the conflict policy to dstClean and returns the final
@@ -142,14 +145,8 @@ func resolveDest(ctx context.Context, dst Dest, dstClean string, c Conflict) (st
 
 // freeName returns "name (N).ext" for the smallest N that is free.
 func freeName(ctx context.Context, dst Dest, p string) (string, error) {
-	dir, base := path.Split(p)
-	ext := path.Ext(base)
-	if ext == base { // dotfile: no extension
-		ext = ""
-	}
-	stem := strings.TrimSuffix(base, ext)
-	for i := 1; i < 10000; i++ {
-		cand := fmt.Sprintf("%s%s (%d)%s", dir, stem, i, ext)
+	for i := 1; i < maxNameTries; i++ {
+		cand := numberedName(p, i)
 		if _, err := dst.Stat(ctx, cand); vfs.CodeOf(err) == vfs.CodeNotFound {
 			return cand, nil
 		} else if err != nil {
@@ -157,6 +154,16 @@ func freeName(ctx context.Context, dst Dest, p string) (string, error) {
 		}
 	}
 	return "", vfs.E(vfs.CodeConflict, "no free name for %q", p)
+}
+
+// numberedName returns "name (i).ext" for p.
+func numberedName(p string, i int) string {
+	dir, base := path.Split(p)
+	ext := path.Ext(base)
+	if ext == base { // dotfile: no extension
+		ext = ""
+	}
+	return fmt.Sprintf("%s%s (%d)%s", dir, strings.TrimSuffix(base, ext), i, ext)
 }
 
 // fetchOnce brings the part file to a complete, fsynced, verified copy of the

@@ -45,6 +45,7 @@ type Spec struct {
 // FetchResult reports where the file went, or why it was not transferred.
 type FetchResult struct {
 	Dst        string
+	SrcETag    string // the source version that was verified and committed
 	Skipped    bool
 	SkipReason string
 }
