@@ -335,3 +335,89 @@ func TestGCPartsSkipsActive(t *testing.T) {
 		t.Fatalf("after gc: %v", got)
 	}
 }
+
+func TestIntermediateSymlinkRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on windows")
+	}
+	fs, dir := newShare(t, false)
+	os.Mkdir(filepath.Join(dir, "d"), 0o755)
+	write(t, filepath.Join(dir, "d", "file"), "orig")
+	os.Symlink("d", filepath.Join(dir, "link"))
+	os.Mkdir(filepath.Join(dir, vfs.PartDir), 0o700)
+	write(t, filepath.Join(dir, vfs.PartDir, "secret.part"), "s")
+	os.Symlink(vfs.PartDir, filepath.Join(dir, "pl"))
+
+	// move-onto-itself data loss scenario
+	f, _, err := fs.OpenPart("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("new")
+	f.Close()
+	wantCode(t, fs.CommitPart("k", "link/file", time.Now(), 0o644), vfs.CodeInvalidPath)
+	if got := readAll(t, fs, "d/file"); got != "orig" {
+		t.Fatalf("d/file = %q", got)
+	}
+	// part dir exposure
+	_, _, err = fs.Open(ctx, "pl/secret.part", 0, "")
+	wantCode(t, err, vfs.CodeInvalidPath)
+	_, err = fs.Stat(ctx, "pl/secret.part")
+	wantCode(t, err, vfs.CodeInvalidPath)
+	_, err = fs.List(ctx, "pl")
+	wantCode(t, err, vfs.CodeInvalidRequest) // final component symlink is not a directory
+	_, err = fs.Hash(ctx, "link/file")
+	wantCode(t, err, vfs.CodeInvalidPath)
+	_, err = fs.Put(ctx, "link/new", strings.NewReader("x"), vfs.PutOptions{})
+	wantCode(t, err, vfs.CodeInvalidPath)
+	wantCode(t, fs.Mkdir(ctx, "link/m"), vfs.CodeInvalidPath)
+	wantCode(t, fs.Remove(ctx, "link/file", false), vfs.CodeInvalidPath)
+	wantCode(t, fs.Rename(ctx, "link/file", "z"), vfs.CodeInvalidPath)
+	wantCode(t, fs.Rename(ctx, "d/file", "link/z"), vfs.CodeInvalidPath)
+	if got := readAll(t, fs, "d/file"); got != "orig" {
+		t.Fatalf("d/file = %q", got)
+	}
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+func TestPutReaderErrors(t *testing.T) {
+	fs, dir := newShare(t, false)
+	_, err := fs.Put(ctx, "a", errReader{io.ErrUnexpectedEOF}, vfs.PutOptions{})
+	wantCode(t, err, vfs.CodeInternal)
+	if !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("message lost: %v", err)
+	}
+	// a source-side ENOENT/ENOSPC must not be classified as a local condition
+	_, err = fs.Put(ctx, "a", errReader{&os.PathError{Op: "read", Path: "x", Err: os.ErrNotExist}}, vfs.PutOptions{})
+	wantCode(t, err, vfs.CodeInternal)
+	_, err = fs.Put(ctx, "a", errReader{vfs.E(vfs.CodePeerOffline, "gone")}, vfs.PutOptions{})
+	wantCode(t, err, vfs.CodePeerOffline)
+	if _, err := os.Stat(filepath.Join(dir, "a")); err == nil {
+		t.Fatal("partial file committed")
+	}
+}
+
+func TestCommitPartRetryAfterFailure(t *testing.T) {
+	fs, dir := newShare(t, false)
+	f, _, _ := fs.OpenPart("k")
+	f.WriteString("data")
+	f.Close()
+	wantCode(t, fs.CommitPart("k", "missing/out", time.Now(), 0o444), vfs.CodeNotFound)
+	os.Mkdir(filepath.Join(dir, "missing"), 0o755)
+	if err := fs.CommitPart("k", "missing/out", time.Now(), 0o444); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	// a part left read-only (kill between chmod and rename) can be reopened
+	f, _, _ = fs.OpenPart("k2")
+	f.WriteString("ab")
+	f.Close()
+	os.Chmod(filepath.Join(dir, vfs.PartDir, "k2.part"), 0o444)
+	f, size, err := fs.OpenPart("k2")
+	if err != nil || size != 2 {
+		t.Fatalf("reopen: %d %v", size, err)
+	}
+	f.Close()
+}

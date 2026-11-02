@@ -36,6 +36,12 @@ func (l *LocalFS) ensurePartDir() error {
 	return nil
 }
 
+// restoreWrite gives the owner write access back to a part that an earlier,
+// interrupted CommitPart left with the (possibly read-only) source mode.
+func (l *LocalFS) restoreWrite(name string) {
+	l.root.Chmod(name, 0o600)
+}
+
 // OpenPart opens (creating if needed) the partial file for key, positioned
 // at its end so the caller can append, and returns its current size.
 func (l *LocalFS) OpenPart(key string) (*os.File, int64, error) {
@@ -48,6 +54,7 @@ func (l *LocalFS) OpenPart(key string) (*os.File, int64, error) {
 	if err := l.ensurePartDir(); err != nil {
 		return nil, 0, err
 	}
+	l.restoreWrite(partPath(key, partExt))
 	f, err := l.root.OpenFile(partPath(key, partExt), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, 0, mapErr(err)
@@ -126,7 +133,7 @@ func (l *LocalFS) CommitPart(key, dst string, mtime time.Time, mode uint32) erro
 	if err := l.writable(); err != nil {
 		return err
 	}
-	d, err := vfs.Clean(dst)
+	d, err := l.cleanPath(dst)
 	if err != nil {
 		return err
 	}
@@ -134,6 +141,7 @@ func (l *LocalFS) CommitPart(key, dst string, mtime time.Time, mode uint32) erro
 		return vfs.E(vfs.CodeInvalidPath, "cannot commit to the share root")
 	}
 	pp := partPath(key, partExt)
+	l.restoreWrite(pp)
 	f, err := l.root.OpenFile(pp, os.O_RDWR, 0)
 	if err != nil {
 		return mapErr(err)

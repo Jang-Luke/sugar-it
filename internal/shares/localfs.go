@@ -78,7 +78,49 @@ func mapErr(err error) error {
 	case errors.Is(err, syscall.ENOTDIR):
 		return vfs.E(vfs.CodeNotFound, "not a directory")
 	}
-	return vfs.E(vfs.CodeInternal, "%v", errors.Unwrap(err))
+	var pe *fs.PathError
+	var le *os.LinkError
+	switch {
+	case errors.As(err, &pe):
+		return vfs.E(vfs.CodeInternal, "%s: %v", pe.Op, pe.Err)
+	case errors.As(err, &le):
+		return vfs.E(vfs.CodeInternal, "%s: %v", le.Op, le.Err)
+	}
+	return vfs.E(vfs.CodeInternal, "%v", err)
+}
+
+// noLinks rejects a clean path whose intermediate components are symlinks,
+// so nothing is ever reached through a link (inside the share or not).
+// Missing components are left for the operation itself to report.
+func (l *LocalFS) noLinks(clean string) error {
+	for i := 0; i < len(clean); i++ {
+		if clean[i] != '/' {
+			continue
+		}
+		fi, err := l.root.Lstat(clean[:i])
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return mapErr(err)
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return vfs.E(vfs.CodeInvalidPath, "path traverses a symlink")
+		}
+	}
+	return nil
+}
+
+// cleanPath is vfs.Clean plus the symlink-traversal check.
+func (l *LocalFS) cleanPath(p string) (string, error) {
+	c, err := vfs.Clean(p)
+	if err != nil {
+		return "", err
+	}
+	if err := l.noLinks(c); err != nil {
+		return "", err
+	}
+	return c, nil
 }
 
 func ctxErr(ctx context.Context) error {
@@ -140,7 +182,7 @@ func (l *LocalFS) lstat(clean string) (fs.FileInfo, error) {
 }
 
 func (l *LocalFS) List(ctx context.Context, p string) ([]vfs.Entry, error) {
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +223,7 @@ func (l *LocalFS) List(ctx context.Context, p string) ([]vfs.Entry, error) {
 }
 
 func (l *LocalFS) Stat(ctx context.Context, p string) (vfs.Entry, error) {
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return vfs.Entry{}, err
 	}
@@ -221,7 +263,7 @@ func (l *LocalFS) openRegular(c string) (*os.File, vfs.Entry, error) {
 }
 
 func (l *LocalFS) Open(ctx context.Context, p string, offset int64, etag string) (io.ReadCloser, vfs.Entry, error) {
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return nil, vfs.Entry{}, err
 	}
@@ -252,20 +294,39 @@ func (l *LocalFS) Open(ctx context.Context, p string, offset int64, etag string)
 	return f, e, nil
 }
 
+// ctxReader aborts on cancellation and remembers the first non-EOF error
+// from the underlying reader, so source errors are not mistaken for local
+// write errors.
 type ctxReader struct {
 	ctx context.Context
 	r   io.Reader
+	err *error
 }
 
 func (c ctxReader) Read(b []byte) (int, error) {
 	if err := ctxErr(c.ctx); err != nil {
+		*c.err = err
 		return 0, err
 	}
-	return c.r.Read(b)
+	n, err := c.r.Read(b)
+	if err != nil && err != io.EOF && *c.err == nil {
+		*c.err = err
+	}
+	return n, err
+}
+
+// srcErr converts a reader-side error: vfs errors pass through, anything
+// else is reported as internal with its text.
+func srcErr(err error) error {
+	var ve *vfs.Error
+	if errors.As(err, &ve) {
+		return ve
+	}
+	return vfs.E(vfs.CodeInternal, "source read: %v", err)
 }
 
 func (l *LocalFS) Hash(ctx context.Context, p string) (string, error) {
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return "", err
 	}
@@ -275,7 +336,11 @@ func (l *LocalFS) Hash(ctx context.Context, p string) (string, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, ctxReader{ctx, f}); err != nil {
+	var rerr error
+	if _, err := io.Copy(h, ctxReader{ctx, f, &rerr}); err != nil {
+		if rerr != nil {
+			return "", srcErr(rerr)
+		}
 		return "", mapErr(err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -285,7 +350,7 @@ func (l *LocalFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptio
 	if err := l.writable(); err != nil {
 		return vfs.Entry{}, err
 	}
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return vfs.Entry{}, err
 	}
@@ -317,7 +382,12 @@ func (l *LocalFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptio
 		}
 	}()
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(f, h), ctxReader{ctx, r})
+	var rerr error
+	_, err = io.Copy(io.MultiWriter(f, h), ctxReader{ctx, r, &rerr})
+	if err != nil && rerr != nil {
+		f.Close()
+		return vfs.Entry{}, srcErr(rerr)
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -368,7 +438,7 @@ func (l *LocalFS) Mkdir(ctx context.Context, p string) error {
 	if err := l.writable(); err != nil {
 		return err
 	}
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return err
 	}
@@ -385,7 +455,7 @@ func (l *LocalFS) Remove(ctx context.Context, p string, recursive bool) error {
 	if err := l.writable(); err != nil {
 		return err
 	}
-	c, err := vfs.Clean(p)
+	c, err := l.cleanPath(p)
 	if err != nil {
 		return err
 	}
@@ -420,11 +490,11 @@ func (l *LocalFS) Rename(ctx context.Context, from, to string) error {
 	if err := l.writable(); err != nil {
 		return err
 	}
-	f, err := vfs.Clean(from)
+	f, err := l.cleanPath(from)
 	if err != nil {
 		return err
 	}
-	t, err := vfs.Clean(to)
+	t, err := l.cleanPath(to)
 	if err != nil {
 		return err
 	}

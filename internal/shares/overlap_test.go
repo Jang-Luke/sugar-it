@@ -76,3 +76,30 @@ func TestCheckOverlapSymlink(t *testing.T) {
 	ex2 := []Spec{{Name: "l", Path: link}}
 	wantCode(t, CheckOverlap(ex2, filepath.Join(real, "sub"), runtime.GOOS), vfs.CodeShareOverlap)
 }
+
+func TestOverlapByIdentity(t *testing.T) {
+	// fake identities: two spellings (NFC/NFD, bind mount) of one directory
+	ids := map[string]string{
+		"/u/spellingA": "dir1",
+		"/u/spellingB": "dir1",
+		"/u/other":     "dir2",
+		"/mnt/alias":   "dir1",
+		"/mnt":         "dir3",
+		"/":            "root",
+		"/u":           "dir4",
+	}
+	same := func(a, b string) bool {
+		x, ok1 := ids[a]
+		y, ok2 := ids[b]
+		return ok1 && ok2 && x == y
+	}
+	if !overlapByIdentity("/mnt/alias/sub", "/u/spellingB", same) {
+		t.Fatal("child of alias not detected")
+	}
+	if !overlapByIdentity("/u/spellingA", "/mnt/alias/sub", same) {
+		t.Fatal("parent via alias not detected")
+	}
+	if overlapByIdentity("/u/other", "/u/spellingA", same) {
+		t.Fatal("false positive")
+	}
+}
