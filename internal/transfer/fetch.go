@@ -9,7 +9,6 @@ import (
 	"io"
 	"path"
 	"strings"
-	"syscall"
 
 	"sugarintegration/internal/shares"
 	"sugarintegration/internal/vfs"
@@ -21,9 +20,14 @@ const copyBuf = 256 << 10
 // stat, conflict check, resume-or-restart, stream, fsync, verify the hash and
 // the source etag, then an atomic commit. The destination only ever holds a
 // complete, verified file. Fetch never touches the source (the caller removes
-// it for a move, after Fetch returns). progress receives the bytes written by
-// this call (resumed bytes are not counted again). goos is the destination
-// OS (runtime.GOOS) used for name validation.
+// it for a move, after Fetch returns). goos is the destination OS
+// (runtime.GOOS) used for name validation.
+//
+// progress receives deltas whose running sum is always the number of bytes
+// held in the part file: bytes already in a resumed part are reported once as
+// a positive delta when resuming starts, new bytes as they are written, and a
+// restart, part reset or removal reports a negative delta equal to everything
+// reported so far. After a commit the sum equals the file size.
 func Fetch(ctx context.Context, src vfs.FS, srcPath string, dst Dest, dstPath, partKey string,
 	c Conflict, goos string, progress func(n int64)) (FetchResult, error) {
 	if progress == nil {
@@ -48,6 +52,17 @@ func Fetch(ctx context.Context, src vfs.FS, srcPath string, dst Dest, dstPath, p
 		return FetchResult{}, vfs.E(vfs.CodeInvalidRequest, "unknown conflict policy %q", c)
 	}
 
+	held := int64(0) // bytes reported so far for this call
+	report := func(d int64) {
+		held += d
+		progress(d)
+	}
+	drop := func() { // the part is gone: progress returns to zero
+		if held != 0 {
+			report(-held)
+		}
+	}
+
 	// 1. source stat
 	se, err := src.Stat(ctx, srcPath)
 	if err != nil {
@@ -70,13 +85,14 @@ func Fetch(ctx context.Context, src vfs.FS, srcPath string, dst Dest, dstPath, p
 	// 3-6. transfer; a changed source gets one clean restart.
 	var entry vfs.Entry
 	for attempt := 0; ; attempt++ {
-		entry, err = fetchOnce(ctx, src, srcPath, dst, partKey, progress)
+		entry, err = fetchOnce(ctx, src, srcPath, dst, partKey, report, drop)
 		if err == nil {
 			break
 		}
 		if vfs.CodeOf(err) != vfs.CodeChanged {
 			return FetchResult{}, err
 		}
+		drop()
 		if rerr := dst.RemovePart(partKey); rerr != nil {
 			return FetchResult{}, rerr
 		}
@@ -88,6 +104,7 @@ func Fetch(ctx context.Context, src vfs.FS, srcPath string, dst Dest, dstPath, p
 	// The destination may have changed while we transferred: decide again.
 	final, res, err = resolveDest(ctx, dst, dstClean, c)
 	if err != nil || res.Skipped {
+		drop()
 		dst.RemovePart(partKey)
 		return res, err
 	}
@@ -146,7 +163,7 @@ func freeName(ctx context.Context, dst Dest, p string) (string, error) {
 // source and returns the source entry it matches. A `changed` error means the
 // source moved under us; the caller resets the part.
 func fetchOnce(ctx context.Context, src vfs.FS, srcPath string, dst Dest, key string,
-	progress func(int64)) (vfs.Entry, error) {
+	report func(int64), drop func()) (vfs.Entry, error) {
 	se, err := src.Stat(ctx, srcPath)
 	if err != nil {
 		return vfs.Entry{}, err
@@ -185,6 +202,9 @@ func fetchOnce(ctx context.Context, src vfs.FS, srcPath string, dst Dest, key st
 			closed = false
 		}
 	}
+	if size > 0 {
+		report(size) // resuming: these bytes are already held
+	}
 	if size == 0 {
 		if err := dst.SetPartETag(key, se.ETag); err != nil {
 			return vfs.Entry{}, err
@@ -200,7 +220,7 @@ func fetchOnce(ctx context.Context, src vfs.FS, srcPath string, dst Dest, key st
 	if oe.ETag != se.ETag {
 		return vfs.Entry{}, vfs.E(vfs.CodeChanged, "source changed")
 	}
-	if err := stream(ctx, f, rc, progress); err != nil {
+	if err := stream(ctx, f, rc, report); err != nil {
 		return vfs.Entry{}, err
 	}
 
@@ -229,6 +249,7 @@ func fetchOnce(ctx context.Context, src vfs.FS, srcPath string, dst Dest, key st
 		return vfs.Entry{}, vfs.E(vfs.CodeChanged, "source changed during transfer")
 	}
 	if n != se.Size || sum != srcSum {
+		drop()
 		dst.RemovePart(key)
 		return vfs.Entry{}, vfs.E(vfs.CodeHashMismatch, "transferred data does not match the source")
 	}
@@ -303,7 +324,7 @@ func writeErr(err error) error {
 	switch {
 	case errors.As(err, &ve):
 		return ve
-	case errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT):
+	case shares.IsDiskFull(err):
 		return vfs.E(vfs.CodeDiskFull, "no space left on device")
 	}
 	return vfs.E(vfs.CodeInternal, "write: %v", err)

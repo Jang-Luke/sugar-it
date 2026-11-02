@@ -128,22 +128,118 @@ func TestFetchResumesAfterDrop(t *testing.T) {
 }
 
 func TestFetchSourceChangedRestarts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int // new source size
+	}{{"larger than part", 2 << 20}, {"same size as original", 1 << 20}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			orig := randBytes(1 << 20)
+			e.write(t, e.srcDir, "a", orig)
+			mt := time.Unix(1700000000, 0)
+			os.Chtimes(filepath.Join(e.srcDir, "a"), mt, mt)
+			f := newFault(e.src)
+			f.dropAfter = 512 << 10
+			_, err := fetch(e, f, "a", "a", ConflictFail)
+			wantCode(t, err, vfs.CodePeerOffline)
+			f.dropAfter = -1
+			// Different content; same-size case differs only by mtime in etag.
+			nd := randBytes(tc.size + 1)[1:]
+			e.write(t, e.srcDir, "a", nd)
+			os.Chtimes(filepath.Join(e.srcDir, "a"), mt.Add(time.Hour), mt.Add(time.Hour))
+			if _, err := fetch(e, f, "a", "a", ConflictFail); err != nil {
+				t.Fatal(err)
+			}
+			if e.read(t, e.dstDir, "a") != string(nd) {
+				t.Fatal("stale part leaked into the result")
+			}
+			if f.offsets[len(f.offsets)-1] != 0 {
+				t.Fatalf("expected restart from 0, offsets %v", f.offsets)
+			}
+		})
+	}
+}
+
+// tracker follows the progress contract: the running sum is the number of
+// bytes held in the part.
+type tracker struct{ sum, max int64 }
+
+func (p *tracker) add(n int64) {
+	p.sum += n
+	if p.sum > p.max {
+		p.max = p.sum
+	}
+}
+
+func TestFetchProgressResume(t *testing.T) {
 	e := newEnv(t)
-	e.write(t, e.srcDir, "a", randBytes(1<<20))
+	e.write(t, e.srcDir, "big", randBytes(3<<20))
 	f := newFault(e.src)
-	f.dropAfter = 512 << 10
-	_, err := fetch(e, f, "a", "a", ConflictFail)
+	f.dropAfter = 1 << 20
+	var p1 tracker
+	_, err := Fetch(context.Background(), f, "big", e.dst, "big", "k1", ConflictFail, "linux", p1.add)
 	wantCode(t, err, vfs.CodePeerOffline)
+	if p1.sum != 1<<20 {
+		t.Fatalf("first sum %d", p1.sum)
+	}
 	f.dropAfter = -1
-	e.write(t, e.srcDir, "a", []byte("brand new content"))
-	if _, err := fetch(e, f, "a", "a", ConflictFail); err != nil {
+	var p2 tracker
+	if _, err := Fetch(context.Background(), f, "big", e.dst, "big", "k1", ConflictFail, "linux", p2.add); err != nil {
 		t.Fatal(err)
 	}
-	if e.read(t, e.dstDir, "a") != "brand new content" {
-		t.Fatal("stale part leaked into the result")
+	if p2.sum != 3<<20 || p2.max != 3<<20 {
+		t.Fatalf("resumed call: sum %d max %d, want %d", p2.sum, p2.max, 3<<20)
 	}
-	if f.offsets[len(f.offsets)-1] != 0 {
-		t.Fatalf("expected restart from 0, offsets %v", f.offsets)
+}
+
+func TestFetchProgressChangedRestart(t *testing.T) {
+	e := newEnv(t)
+	p := filepath.Join(e.srcDir, "a")
+	e.write(t, e.srcDir, "a", randBytes(1<<20))
+	f := newFault(e.src)
+	n := 0
+	f.hookAt = 512 << 10
+	f.hook = func() {
+		if n++; n == 1 {
+			os.WriteFile(p, randBytes(2<<20), 0o640)
+		}
+	}
+	var pr tracker
+	if _, err := Fetch(context.Background(), f, "a", e.dst, "a", "k1", ConflictFail, "linux", pr.add); err != nil {
+		t.Fatal(err)
+	}
+	if pr.sum != 2<<20 {
+		t.Fatalf("sum %d, want %d", pr.sum, 2<<20)
+	}
+	if pr.max > 2<<20 {
+		t.Fatalf("progress exceeded the file size: max %d", pr.max)
+	}
+}
+
+func TestFetchProgressFailedTransferReturnsToZero(t *testing.T) {
+	e := newEnv(t)
+	e.write(t, e.srcDir, "a", []byte("data"))
+	f := newFault(e.src)
+	f.hash = "00ff"
+	var pr tracker
+	_, err := Fetch(context.Background(), f, "a", e.dst, "a", "k1", ConflictFail, "linux", pr.add)
+	wantCode(t, err, vfs.CodeHashMismatch)
+	if pr.sum != 0 {
+		t.Fatalf("sum %d after the part was removed", pr.sum)
+	}
+}
+
+func TestFetchProgressStalePartReset(t *testing.T) {
+	e := newEnv(t)
+	e.write(t, e.srcDir, "a", []byte("0123456789"))
+	os.MkdirAll(filepath.Join(e.dstDir, vfs.PartDir), 0o700)
+	e.write(t, filepath.Join(e.dstDir, vfs.PartDir), "k1.part", []byte("JUNK"))
+	var pr tracker
+	if _, err := Fetch(context.Background(), e.src, "a", e.dst, "a", "k1", ConflictFail, "linux", pr.add); err != nil {
+		t.Fatal(err)
+	}
+	if pr.sum != 10 || pr.max != 10 {
+		t.Fatalf("sum %d max %d", pr.sum, pr.max)
 	}
 }
 

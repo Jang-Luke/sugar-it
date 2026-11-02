@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -420,4 +421,13 @@ func TestCommitPartRetryAfterFailure(t *testing.T) {
 		t.Fatalf("reopen: %d %v", size, err)
 	}
 	f.Close()
+}
+
+func TestIsDiskFull(t *testing.T) {
+	if !IsDiskFull(&os.PathError{Op: "write", Path: "x", Err: diskFullErrno}) {
+		t.Fatal("native disk-full errno not recognised")
+	}
+	if IsDiskFull(errors.New("other")) || IsDiskFull(nil) {
+		t.Fatal("false positive")
+	}
 }

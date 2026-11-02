@@ -15,3 +15,6 @@ const (
 func isDiskFull(err error) bool {
 	return errors.Is(err, errorDiskFull) || errors.Is(err, errorHandleDiskFull)
 }
+
+// IsDiskFull reports whether err is the OS's out-of-space error.
+func IsDiskFull(err error) bool { return isDiskFull(err) }
