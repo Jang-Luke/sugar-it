@@ -62,7 +62,13 @@ func (l *LocalFS) syncParent(clean string) error {
 	if i := strings.LastIndexByte(clean, '/'); i >= 0 {
 		dir = clean[:i]
 	}
-	return mapErr(l.syncDir(dir))
+	err := l.syncDir(dir)
+	// Network and FAT-style mounts reject directory fsync. Nothing more can be
+	// done for such a share, and failing would stop every commit to it.
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+		return nil
+	}
+	return mapErr(err)
 }
 
 func (l *LocalFS) Close() error   { return l.root.Close() }

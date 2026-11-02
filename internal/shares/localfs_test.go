@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -594,5 +596,69 @@ func TestSyncParentStaysInShare(t *testing.T) {
 	}
 	if err := l.SyncParent("f"); err != nil || len(synced) != 1 || synced[0] != "." {
 		t.Errorf("%v, %q", err, synced)
+	}
+}
+
+// Network and FAT-style mounts reject directory fsync. That must not fail every
+// commit; only those two errors are forgiven, however they are wrapped.
+func TestDirSyncUnsupportedIsNoOp(t *testing.T) {
+	for _, unsupported := range []error{
+		syscall.EINVAL,
+		syscall.ENOTSUP,
+		&fs.PathError{Op: "sync", Path: "d", Err: syscall.EINVAL},
+		&fs.PathError{Op: "sync", Path: "d", Err: syscall.ENOTSUP},
+	} {
+		dir := t.TempDir()
+		l, err := Open(Spec{Name: "s", Path: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		calls := 0
+		recordDirSyncs(l, func(string) error { calls++; return unsupported })
+		f, _, err := l.OpenPart("k")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.WriteString("data")
+		f.Close()
+		if err := l.CommitPart("k", "f", time.Now(), 0o644); err != nil {
+			t.Errorf("%v: CommitPart: %v", unsupported, err)
+		}
+		if _, err := l.Put(ctx, "g", strings.NewReader("x"), vfs.PutOptions{}); err != nil {
+			t.Errorf("%v: Put: %v", unsupported, err)
+		}
+		if err := l.Mkdir(ctx, "d"); err != nil {
+			t.Errorf("%v: Mkdir: %v", unsupported, err)
+		}
+		if err := l.SyncParent("f"); err != nil {
+			t.Errorf("%v: SyncParent: %v", unsupported, err)
+		}
+		if calls != 4 {
+			t.Errorf("%v: the sync must still be tried each time: %d calls", unsupported, calls)
+		}
+	}
+}
+
+func TestDirSyncOtherErrorsStillFail(t *testing.T) {
+	for _, other := range []error{syscall.EIO, syscall.EACCES, &fs.PathError{Op: "sync", Path: "d", Err: syscall.EIO}} {
+		dir := t.TempDir()
+		l, err := Open(Spec{Name: "s", Path: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		recordDirSyncs(l, func(string) error { return other })
+		f, _, err := l.OpenPart("k")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		if err := l.CommitPart("k", "f", time.Now(), 0o644); err == nil {
+			t.Errorf("%v: CommitPart succeeded", other)
+		}
+		if err := l.SyncParent("f"); err == nil {
+			t.Errorf("%v: SyncParent succeeded", other)
+		}
 	}
 }

@@ -130,6 +130,8 @@ func (l *LocalFS) RemovePart(key string) error {
 // complete file already at dst and the part and etag gone, but the name not
 // known to be durable: the caller must not treat it as committed, and can
 // finish with SyncParent.
+// A filesystem that does not support directory fsync (EINVAL, ENOTSUP) is not
+// an error, and on one the new name's durability is whatever that mount gives.
 func (l *LocalFS) CommitPart(key, dst string, mtime time.Time, mode uint32) error {
 	if err := checkKey(key); err != nil {
 		return err
