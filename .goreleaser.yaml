@@ -1,0 +1,46 @@
+# Run locally only as `goreleaser release --snapshot --clean`; CI runs it on a tag.
+version: 2
+
+project_name: sugar-it
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: sugar-it
+    main: ./cmd/sugar-it
+    binary: sugar-it
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X sugarintegration/internal/cli.Version={{.Version}}
+
+archives:
+  - id: sugar-it
+    formats: [tar.gz]
+    name_template: "sugar-it_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - id: sugar-it
+    package_name: sugar-it
+    file_name_template: "sugar-it_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    ids: [sugar-it]
+    formats: [deb, rpm]
+    maintainer: sugar-it
+    description: Share folders between your computers.
+    bindir: /usr/bin
+    # No scripts: installing the package never enables or starts a service.
+    # Run `sugar-it service install` as your own user.
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true

@@ -105,7 +105,7 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
 2. Hosts tab, "공유 추가": pick a folder with a few files, name it `docs`.
    It appears in the list. Try a name with capitals: an error message in Korean.
 3. Hosts tab, "초대 만들기" in the app; run `sugar-it --config-dir /tmp/b peer
-   join '<invite>'`. Host B appears online. Make a share on B
+   add '<invite>'`. Host B appears online. Make a share on B
    (`sugar-it --config-dir /tmp/b share add data <folder>`).
 4. Files tab: left pane `이 컴퓨터` / `docs`, right pane host B / `data`. Select
    a file, "복사 →". A notice appears; the Transfers tab shows the progress bar,

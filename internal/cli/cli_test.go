@@ -325,3 +325,16 @@ func TestJobsCancelRetryNeedKnownID(t *testing.T) {
 		t.Fatalf("exit %d stderr %q", code, errs)
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	old := cli.Version
+	cli.Version = "v9.8.7-test"
+	t.Cleanup(func() { cli.Version = old })
+	var out, errb bytes.Buffer
+	if code := cli.Execute([]string{"--version"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "v9.8.7-test") {
+		t.Fatalf("--version output %q lacks the injected version", out.String())
+	}
+}

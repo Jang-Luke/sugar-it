@@ -22,6 +22,10 @@ import (
 	"sugarintegration/internal/vfs"
 )
 
+// Version is the release version. Release builds set it with
+// -ldflags "-X sugarintegration/internal/cli.Version=...".
+var Version = "dev"
+
 // Exit codes.
 const (
 	exitOK      = 0
@@ -144,7 +148,9 @@ func errText(err error) string {
 }
 
 func newRoot(e *env) *cobra.Command {
+	control.Version = Version // what `status` reports
 	root := &cobra.Command{
+		Version:       Version,
 		Use:           "sugar-it",
 		Short:         "Share folders between your computers",
 		SilenceUsage:  true,
