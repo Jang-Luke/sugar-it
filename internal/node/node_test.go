@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -118,6 +119,9 @@ func (tn *tnode) stop() {
 	if tn.srv.Shutdown(ctx) != nil {
 		tn.srv.Close()
 	}
+	// As the daemon does at shutdown. On Windows an open share root keeps its
+	// directory from being renamed or removed, TempDir cleanup included.
+	tn.n.Close()
 }
 
 func (tn *tnode) share(name string, files map[string]string) string {
@@ -592,6 +596,17 @@ func TestMissingShareDirReportsError(t *testing.T) {
 	pair(t, a, b)
 	dir := a.share("docs", map[string]string{"f": "x"})
 	moved := dir + ".gone"
+	// On Windows the open root locks the directory against this very rename, so
+	// there it can only go away while no root is held. Elsewhere the root stays
+	// cached and has to notice.
+	release := func() {
+		if runtime.GOOS == "windows" {
+			a.n.fsMu.Lock()
+			defer a.n.fsMu.Unlock()
+			a.n.fsCache["docs"].fs.Close()
+			delete(a.n.fsCache, "docs")
+		}
+	}
 	list := func(n *Node, peer string) error {
 		f, err := n.FS(bg, peer, "docs")
 		if err != nil {
@@ -603,6 +618,7 @@ func TestMissingShareDirReportsError(t *testing.T) {
 	if err := list(a.n, "local"); err != nil {
 		t.Fatal(err)
 	}
+	release()
 	if err := os.Rename(dir, moved); err != nil {
 		t.Fatal(err)
 	}
@@ -625,6 +641,7 @@ func TestMissingShareDirReportsError(t *testing.T) {
 	}
 	// A replaced directory is a different directory: the cache must not keep
 	// serving the old one.
+	release()
 	os.RemoveAll(dir)
 	os.Mkdir(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, "fresh"), nil, 0o644)
@@ -1273,9 +1290,6 @@ func TestGossipedRemovalStopsJobs(t *testing.T) {
 // The probe of the review: a host whose jobs directory cannot be written told
 // the peer that asked exactly where that directory is.
 func TestLocalPathsDoNotReachPeers(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores permissions")
-	}
 	a, b := startNode(t, "alpha"), startNode(t, "bravo")
 	pair(t, a, b)
 	a.share("docs", map[string]string{"f": "x"})
@@ -1286,11 +1300,15 @@ func TestLocalPathsDoNotReachPeers(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.n.AttachJobs(m)
+	// A file in the way fails the job's save on every OS and for every user,
+	// unlike permission bits, which Windows and root ignore.
 	dir := filepath.Join(jobs, "jobs")
-	if err := os.Chmod(dir, 0o500); err != nil {
+	if err := os.Remove(dir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if err := os.WriteFile(dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cl, err := b.n.Client(a.id.ID)
 	if err != nil {
 		t.Fatal(err)

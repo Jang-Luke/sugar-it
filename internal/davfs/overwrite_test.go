@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -364,9 +365,20 @@ func TestNameRulesFollowTheOS(t *testing.T) {
 	if st, _, _ := wenv.req(t, "MKCOL", "/local/docs/NUL", "", nil); st != 400 {
 		t.Errorf("NUL on windows: status %d, want 400", st)
 	}
-	if st, _, _ := e.req(t, "PUT", "/local/docs/a:b", "x", nil); st != 201 {
-		t.Errorf("a:b on linux: status %d, want 201", st)
+	// A handler left alone follows the OS it runs on, all the way to the disk.
+	want := 201
+	if runtime.GOOS == "windows" {
+		want = 400
 	}
+	if st, _, _ := e.req(t, "PUT", "/local/docs/a:b", "x", nil); st != want {
+		t.Errorf("a:b on %s: status %d, want %d", runtime.GOOS, st, want)
+	}
+	// The rules are picked by goos alone, whichever OS runs this test.
+	h.fs.goos = "linux"
+	if err := h.fs.checkName(nil, "a:b"); err != nil {
+		t.Errorf("a:b under linux rules: %v", err)
+	}
+	h.fs.goos = "windows"
 	if err := h.fs.checkName(&peerapi.RemoteFS{}, "a:b"); err != nil {
 		t.Errorf("a peer's share: %v", err)
 	}

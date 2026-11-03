@@ -89,8 +89,9 @@ func TestOverlapByIdentity(t *testing.T) {
 		"/u":           "dir4",
 	}
 	same := func(a, b string) bool {
-		x, ok1 := ids[a]
-		y, ok2 := ids[b]
+		// The walk up uses filepath, so on Windows it has backslashes.
+		x, ok1 := ids[filepath.ToSlash(a)]
+		y, ok2 := ids[filepath.ToSlash(b)]
 		return ok1 && ok2 && x == y
 	}
 	if !overlapByIdentity("/mnt/alias/sub", "/u/spellingB", same) {

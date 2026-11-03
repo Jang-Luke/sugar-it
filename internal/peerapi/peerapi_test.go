@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -709,11 +710,15 @@ func TestPutOptionsSurviveWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ent.ModTime.Equal(mt) {
+	want := mt
+	if runtime.GOOS == "windows" { // NTFS keeps 100 ns
+		want = mt.Truncate(100 * time.Nanosecond)
+	}
+	if !ent.ModTime.Equal(want) {
 		t.Fatalf("mtime = %v", ent.ModTime)
 	}
 	fi, _ := os.Stat(filepath.Join(dir, "p"))
-	if !fi.ModTime().Equal(mt) {
+	if !fi.ModTime().Equal(want) {
 		t.Fatalf("on disk mtime = %v", fi.ModTime())
 	}
 	_, err = f.Put(bg, "p", strings.NewReader("other"), vfs.PutOptions{})
