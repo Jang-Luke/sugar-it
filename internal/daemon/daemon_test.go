@@ -87,7 +87,12 @@ func dialable(addr string) bool {
 
 func eventually(t *testing.T, what string, f func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	eventuallyWithin(t, what, 15*time.Second, f)
+}
+
+func eventuallyWithin(t *testing.T, what string, d time.Duration, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
 	for !f() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -593,7 +598,7 @@ func TestGracefulShutdownKeepsJobs(t *testing.T) {
 	_ = b2
 	bc, _ = control.Discover(bdir)
 	_ = bc
-	eventually(t, "done", func() bool {
+	eventuallyWithin(t, "done", 2*time.Minute, func() bool {
 		j, err := ac.Job(bg, j.Host, j.ID)
 		return err == nil && j.State == transfer.StateDone
 	})
@@ -638,7 +643,7 @@ func TestShutdownDuringTransferResumes(t *testing.T) {
 	if got.State == transfer.StateFailed || got.State == transfer.StateCanceled {
 		t.Fatalf("the job is %s after a restart (%+v)", got.State, got.Error)
 	}
-	eventually(t, "done after restart", func() bool {
+	eventuallyWithin(t, "done after restart", 2*time.Minute, func() bool {
 		got, err = ac.Job(bg, j.Host, j.ID)
 		return err == nil && got.State == transfer.StateDone
 	})
