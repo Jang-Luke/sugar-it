@@ -260,11 +260,11 @@ func WinError(code uint32) error {
 	var msg string
 	switch code {
 	case 85:
-		msg = "the drive letter is already in use: choose another letter, or disconnect it first (sugar-it unmount --drive Z:)"
+		msg = "the drive letter is already in use: choose another letter, or disconnect it first (sugar-it unmount --drive <letter>:)"
 	case 5, 86, 1326:
 		msg = "Windows rejected the credentials (user " + User + " with the control token): check that the daemon is running with this config directory and that BasicAuthLevel is 2"
 	case 1244:
-		msg = "this session has no logon session that may connect to a network drive (for example over SSH): mount from the desktop session instead"
+		msg = "this session has no logon session that may connect to a network drive: mount from the desktop session instead"
 	case 53, 67, 1203, 1222, 1058, 1068, 1075:
 		msg = "Windows could not reach the WebDAV server: the WebClient service is probably not running or cannot start (check that it is not disabled, then run net start webclient in an administrator prompt) and the sugar-it daemon must be running"
 	case 259:

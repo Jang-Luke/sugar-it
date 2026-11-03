@@ -182,25 +182,15 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer
   scripts, and that binary prints its version. The rpm packages were built but
   never unpacked or installed, and the macOS binaries were built but never run.
-- Mounting on macOS and on Linux (the build host has no `gvfs-backends`), and
-  any mount on Windows. The earlier `net use ... *` mount needed a console for
-  the password prompt and failed over SSH with system error 1244. It was
-  replaced by a direct `WNetUseConnectionW` call (user `sugar-it`, the token as
-  the password argument, remote name `\\127.0.0.1@7445\DavWWWRoot`, no
-  prompt) shared by `sugar-it mount` and the desktop app. That call has not
-  been run on Windows; neither remote name form is documented for WebDAV by
-  the WNet pages.
-- `sugar-it service install` on Windows. It now writes a per-user Run key value
-  with `reg add` instead of a scheduled task (`schtasks /SC ONLOGON` failed
-  with "exit status 1" in the desktop app, which runs without elevation). The
-  daemon is not started by the install; it starts at the next logon, and if
-  the desktop app is running the daemon, only after the app closes. None of
-  this has been run on Windows. `sugar-it.exe` is a console program, so
-  registering it shows a console window at logon; `sugar-it-desktop.exe`
-  (what the desktop app registers when no `sugar-it` sits beside it) is a GUI
-  program and shows none.
-- The desktop app walk-through (no display on the build host). Its Go and
-  front-end tests pass; the window has never been opened.
+- Mounting on macOS and on Linux (the build host has no `gvfs-backends`).
+- Mounting from the Windows app's button, in a desktop session. The same
+  `WNetUseConnectionW` path was run from the CLI over SSH on Windows 11 with
+  `BasicAuthLevel` 2: it connected a chosen and an automatic drive, then listed,
+  read, wrote and deleted, and disconnected. The `\\127.0.0.1@port\DavWWWRoot`
+  form is what that run used.
+- `sugar-it service install` on Windows actually starting the daemon at logon.
+  The Run key value was written with correct quoting and removed again, from an
+  administrator session. A non-administrator has not been tried.
 - The macOS and Windows desktop assets have been built by the release workflow
   but never opened.
 
