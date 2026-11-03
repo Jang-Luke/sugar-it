@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -50,6 +51,7 @@ type Backend interface {
 	Jobs(ctx context.Context) ([]transfer.Job, error)
 	CancelJob(ctx context.Context, host, id string) error
 	RetryJob(ctx context.Context, host, id string) error
+	Shutdown(ctx context.Context) error
 	Token() string
 	DAVAddr() string
 }
@@ -407,12 +409,21 @@ func (a *App) Mount(drive string) (MountResult, error) {
 		if err != nil {
 			return MountResult{}, errors.New(redact(err.Error(), token))
 		}
+		// The notes go back in Notes; running the plan with them would print
+		// them into Output as well. Finder's note points at this app's button,
+		// not at a terminal.
+		notes := make([]string, len(plan.Notes))
+		for i, n := range plan.Notes {
+			notes[i] = strings.ReplaceAll(n, "the token printed below", "the token the app shows")
+		}
+		run := plan
+		run.Notes = nil
 		var out bytes.Buffer
-		assigned, err := mount.RunMount(ctx, planRunner{a, plan}, a.winConnect, plan, token, &out)
+		assigned, err := mount.RunMount(ctx, planRunner{a, run}, a.winConnect, run, token, &out)
 		if err != nil {
 			return MountResult{Output: redact(out.String(), token)}, errors.New(redact(err.Error(), token))
 		}
-		return MountResult{Notes: plan.Notes, Output: redact(out.String(), token), NeedsToken: plan.Stdin == "" && plan.Windows == nil, Drive: assigned}, nil
+		return MountResult{Notes: notes, Output: redact(out.String(), token), NeedsToken: plan.Stdin == "" && plan.Windows == nil, Drive: assigned}, nil
 	})
 }
 
@@ -422,8 +433,10 @@ func (a *App) Unmount(drive string) (MountResult, error) {
 		if err != nil {
 			return MountResult{}, err
 		}
+		run := plan
+		run.Notes = nil // returned in Notes; not printed into Output too
 		var out bytes.Buffer
-		err = a.mountRun(ctx, plan, &out)
+		err = a.mountRun(ctx, run, &out)
 		return MountResult{Notes: plan.Notes, Output: redact(out.String(), b.Token())}, err
 	})
 }
@@ -507,10 +520,30 @@ func (a *App) InstallService() (ServiceResult, error) {
 	defer cancel()
 	var out bytes.Buffer
 	err = a.svcRun(ctx, u, &out)
-	return ServiceResult{Output: out.String()}, wrapErr(err)
+	return ServiceResult{Output: out.String()}, wrapErr(withOutput(err, out.String()))
 }
 
-// UninstallService stops and removes the per-user background service.
+// withOutput adds what a failed command printed to err, so the window can
+// show it: a failed result carries no Output.
+func withOutput(err error, out string) error {
+	if err == nil || strings.TrimSpace(out) == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
+}
+
+// inProcessDaemon stands for the daemon this app hosts, which cannot be asked
+// to stop (it stops with the app), the answer the Control API itself gives.
+type inProcessDaemon struct{}
+
+func (inProcessDaemon) Shutdown(context.Context) error {
+	return vfs.E(vfs.CodeInvalidRequest, "the daemon runs inside the desktop app")
+}
+
+// UninstallService removes the per-user background service. On Linux and
+// macOS that also stops it. On Windows it removes the logon entry (and the
+// v0.1.0 scheduled task) and then asks a running daemon of this config
+// directory to stop, unless this app hosts it: that stops when the app closes.
 func (a *App) UninstallService() (ServiceResult, error) {
 	home := a.home
 	if home == "" {
@@ -527,5 +560,28 @@ func (a *App) UninstallService() (ServiceResult, error) {
 	defer cancel()
 	var out bytes.Buffer
 	err = a.svcUninstall(ctx, u, &out)
-	return ServiceResult{Output: out.String()}, wrapErr(err)
+	if a.goos == "windows" {
+		err = errors.Join(err, a.stopDaemonAfterUninstall(ctx, &out))
+	}
+	return ServiceResult{Output: out.String()}, wrapErr(withOutput(err, out.String()))
+}
+
+func (a *App) stopDaemonAfterUninstall(ctx context.Context, out io.Writer) error {
+	a.mu.Lock()
+	inProc := a.d != nil
+	a.mu.Unlock()
+	if inProc {
+		return service.StopDaemon(ctx, inProcessDaemon{}, nil, out)
+	}
+	b, err := a.client()
+	if err != nil { // no daemon to find; why is shown elsewhere
+		return service.StopDaemon(ctx, nil, nil, out)
+	}
+	err = service.StopDaemon(ctx, b, nil, out)
+	if err == nil {
+		a.mu.Lock()
+		a.be = nil // it is going away; the next call looks again
+		a.mu.Unlock()
+	}
+	return err
 }

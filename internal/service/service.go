@@ -16,7 +16,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"sugarintegration/internal/vfs"
+	"sugarintegration/internal/winout"
 )
+
+const legacyTask = "sugar-it" // the scheduled task v0.1.0 created on Windows
 
 const (
 	unitName    = "sugar-it.service"
@@ -31,9 +36,15 @@ type Unit struct {
 	Path, Content string
 	Commands      [][]string
 	Notes         []string // printed after a successful install
-	// Probe, when set, is run first by Uninstall: if it fails there is nothing
-	// registered, which counts as already uninstalled.
-	Probe []string
+	// Probe, when set, is run first by Uninstall; Commands run only if it
+	// succeeds. When it fails, ProbeKey tells "the value is not there" (the
+	// key can be read) from "the registry cannot be read" (reported as an
+	// error), without depending on the language of reg's message.
+	Probe, ProbeKey []string
+	// LegacyProbe and LegacyDelete remove the v0.1.0 scheduled task: when the
+	// probe finds it, LegacyDelete runs; if that fails (deleting a task made
+	// with elevation needs an administrator) the error says what to run.
+	LegacyProbe, LegacyDelete []string
 }
 
 // Plan builds the install plan for goos. exe is the sugar-it binary, home the
@@ -107,8 +118,11 @@ func UninstallPlan(goos, home string) (Unit, error) {
 		return Unit{Path: p, Commands: [][]string{{"launchctl", "unload", "-w", p}}}, nil
 	case "windows":
 		return Unit{
-			Probe:    []string{"reg", "query", runKey, "/v", runValue},
-			Commands: [][]string{{"reg", "delete", runKey, "/v", runValue, "/f"}},
+			Probe:        []string{"reg", "query", runKey, "/v", runValue},
+			ProbeKey:     []string{"reg", "query", runKey},
+			Commands:     [][]string{{"reg", "delete", runKey, "/v", runValue, "/f"}},
+			LegacyProbe:  []string{"schtasks", "/Query", "/TN", legacyTask},
+			LegacyDelete: []string{"schtasks", "/Delete", "/TN", legacyTask, "/F"},
 		}, nil
 	}
 	return Unit{}, fmt.Errorf("services are not supported on %s", goos)
@@ -142,8 +156,12 @@ type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, argv []string, out io.Writer) error {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = out, out
-	if err := cmd.Run(); err != nil {
+	// Console programs write in the console's code page, not UTF-8.
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	err := cmd.Run()
+	io.WriteString(out, winout.Decode(buf.Bytes()))
+	if err != nil {
 		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
 	}
 	return nil
@@ -182,17 +200,44 @@ func Uninstall(ctx context.Context, u Unit, out io.Writer) error {
 	return UninstallWith(ctx, ExecRunner{}, u, out)
 }
 
-// UninstallWith is Uninstall with an explicit Runner.
+// UninstallWith is Uninstall with an explicit Runner. On Windows it reports
+// what it removed: the Run value, the v0.1.0 scheduled task, or that neither
+// was there. It does not stop a running daemon; see StopDaemon.
 func UninstallWith(ctx context.Context, r Runner, u Unit, out io.Writer) error {
 	var errs []error
-	if len(u.Probe) > 0 && r.Run(ctx, u.Probe, io.Discard) != nil {
-		fmt.Fprintln(out, "sugar-it is not installed as a background service.")
-		return nil
-	}
-	for _, c := range u.Commands {
-		if err := r.Run(ctx, c, out); err != nil {
-			errs = append(errs, err)
+	found := true
+	if len(u.Probe) > 0 {
+		if r.Run(ctx, u.Probe, io.Discard) != nil {
+			found = false
+			if len(u.ProbeKey) > 0 && r.Run(ctx, u.ProbeKey, io.Discard) != nil {
+				errs = append(errs, fmt.Errorf("cannot read the registry to see whether the logon entry exists (%s)", strings.Join(u.ProbeKey, " ")))
+			}
 		}
+	}
+	if found {
+		var cmdErrs []error
+		for _, c := range u.Commands {
+			if err := r.Run(ctx, c, out); err != nil {
+				cmdErrs = append(cmdErrs, err)
+			}
+		}
+		errs = append(errs, cmdErrs...)
+		if len(u.Probe) > 0 && len(cmdErrs) == 0 {
+			fmt.Fprintln(out, "Removed the logon entry (Run value "+runValue+"): sugar-it no longer starts at logon.")
+		}
+	}
+	legacy := false
+	if len(u.LegacyProbe) > 0 && r.Run(ctx, u.LegacyProbe, io.Discard) == nil {
+		legacy = true
+		if err := r.Run(ctx, u.LegacyDelete, out); err != nil {
+			errs = append(errs, fmt.Errorf("the scheduled task %q from sugar-it v0.1.0 is still there: deleting it needs an administrator. Run in an administrator prompt: %s",
+				legacyTask, strings.Join(u.LegacyDelete, " ")))
+		} else {
+			fmt.Fprintf(out, "Removed the scheduled task %q that sugar-it v0.1.0 created.\n", legacyTask)
+		}
+	}
+	if len(u.Probe) > 0 && !found && !legacy && len(errs) == 0 {
+		fmt.Fprintln(out, "sugar-it is not installed as a background service.")
 	}
 	if u.Path != "" {
 		if err := os.Remove(u.Path); err != nil && !os.IsNotExist(err) {
@@ -200,4 +245,38 @@ func UninstallWith(ctx context.Context, r Runner, u Unit, out io.Writer) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Daemon is what StopDaemon needs of a running daemon: *control.Client is one.
+type Daemon interface {
+	Shutdown(ctx context.Context) error
+}
+
+// StopDaemon is the second half of a Windows uninstall, which removes the
+// logon entry but cannot stop a process: d is the daemon that answers for the
+// config directory, nil if none does. It asks that daemon to stop and says
+// which happened. A daemon inside the desktop app refuses; it stops when the
+// app closes. wait, if set, runs after the request is accepted, until the
+// daemon is gone.
+func StopDaemon(ctx context.Context, d Daemon, wait func(context.Context) error, out io.Writer) error {
+	if d == nil {
+		fmt.Fprintln(out, "No daemon is running for this config directory, so there is nothing to stop.")
+		return nil
+	}
+	if err := d.Shutdown(ctx); err != nil {
+		if vfs.CodeOf(err) == vfs.CodeInvalidRequest {
+			fmt.Fprintln(out, "The daemon runs inside the desktop app, so it keeps running and stops when the app closes.")
+			return nil
+		}
+		return fmt.Errorf("could not stop the running daemon: %w", err)
+	}
+	if wait != nil {
+		if err := wait(ctx); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Stopped the running daemon.")
+		return nil
+	}
+	fmt.Fprintln(out, "Asked the running daemon to stop.")
+	return nil
 }

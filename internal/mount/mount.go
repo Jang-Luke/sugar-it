@@ -6,6 +6,7 @@
 package mount
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"sugarintegration/internal/winout"
 )
 
 // User is the WebDAV user name; the password is the control token.
@@ -188,13 +191,17 @@ func (ExecRunner) Run(ctx context.Context, argv []string, stdin string, out io.W
 		return errors.New("empty command")
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = out, out
+	// Console programs write in the console's code page, not UTF-8.
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	} else {
 		cmd.Stdin = os.Stdin // the OS prompts for the password
 	}
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	io.WriteString(out, winout.Decode(buf.Bytes()))
+	if err != nil {
 		return fmt.Errorf("%s failed: %w", argv[0], err)
 	}
 	return nil

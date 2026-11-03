@@ -11,6 +11,7 @@ import (
 
 	"sugarintegration/internal/cli"
 	"sugarintegration/internal/control"
+	"sugarintegration/internal/daemon"
 )
 
 type rec struct {
@@ -116,5 +117,52 @@ func TestServiceInstallAndUninstall(t *testing.T) {
 	}
 	if _, err := os.Stat(unit); !os.IsNotExist(err) || len(s.calls) == 0 {
 		t.Fatalf("unit still there (%v) or no command ran %v", err, s.calls)
+	}
+}
+
+func TestWindowsUninstallStopsTheDaemon(t *testing.T) {
+	defer cli.SetServiceOS("windows")()
+	h := newHost(t, "wu")
+	s := &svcRec{}
+	var out, errb bytes.Buffer
+	if code := cli.ExecuteWithRunners([]string{"--config-dir", h.dir, "service", "uninstall"}, &out, &errb, &rec{}, s); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "Stopped the running daemon") {
+		t.Fatalf("output %q", out.String())
+	}
+	if _, err := control.Discover(h.dir); err == nil {
+		t.Fatal("the daemon still answers")
+	}
+}
+
+func TestWindowsUninstallWithoutDaemon(t *testing.T) {
+	defer cli.SetServiceOS("windows")()
+	var out, errb bytes.Buffer
+	if code := cli.ExecuteWithRunners([]string{"--config-dir", t.TempDir(), "service", "uninstall"}, &out, &errb, &rec{}, &svcRec{}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "nothing to stop") {
+		t.Fatalf("output %q", out.String())
+	}
+}
+
+func TestWindowsUninstallLeavesAnInProcessDaemon(t *testing.T) {
+	defer cli.SetServiceOS("windows")()
+	h := newConfig(t, "wi")
+	d, err := daemon.Start(bg, daemon.Options{ConfigDir: h.dir, InProcess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Shutdown(bg)
+	var out, errb bytes.Buffer
+	if code := cli.ExecuteWithRunners([]string{"--config-dir", h.dir, "service", "uninstall"}, &out, &errb, &rec{}, &svcRec{}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "when the app closes") {
+		t.Fatalf("output %q", out.String())
+	}
+	if _, err := control.Discover(h.dir); err != nil {
+		t.Fatalf("the in-process daemon must keep running: %v", err)
 	}
 }

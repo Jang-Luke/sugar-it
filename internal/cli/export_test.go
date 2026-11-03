@@ -20,3 +20,10 @@ var RotateLog = rotateLog
 func ChildArgs(configDir, listen, control, dav string, advertise []string) []string {
 	return childArgs(configDir, daemonFlags{listen: listen, control: control, dav: dav, advertise: advertise})
 }
+
+// SetServiceOS makes the service commands act for goos until the test ends.
+func SetServiceOS(goos string) (restore func()) {
+	old := serviceOS
+	serviceOS = goos
+	return func() { serviceOS = old }
+}

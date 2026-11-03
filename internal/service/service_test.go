@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"sugarintegration/internal/service"
+	"sugarintegration/internal/vfs"
 )
 
 func TestLinuxUnit(t *testing.T) {
@@ -352,25 +354,146 @@ func TestDaemonIsTheFirstArgument(t *testing.T) {
 	}
 }
 
+// fakeWin answers the Windows uninstall commands by the first word and the
+// distinguishing argument; a command in fail returns an error.
+type fakeWin struct {
+	cmds [][]string
+	fail map[string]bool // keys: "reg-value", "reg-key", "reg-delete", "task-query", "task-delete"
+}
+
+func (f *fakeWin) key(argv []string) string {
+	switch {
+	case argv[0] == "reg" && argv[1] == "delete":
+		return "reg-delete"
+	case argv[0] == "reg" && slices.Contains(argv, "/v"):
+		return "reg-value"
+	case argv[0] == "reg":
+		return "reg-key"
+	case argv[0] == "schtasks" && argv[1] == "/Query":
+		return "task-query"
+	}
+	return "task-delete"
+}
+
+func (f *fakeWin) Run(_ context.Context, argv []string, _ io.Writer) error {
+	f.cmds = append(f.cmds, argv)
+	if f.fail[f.key(argv)] {
+		return os.ErrInvalid
+	}
+	return nil
+}
+
+func (f *fakeWin) ran(key string) bool {
+	for _, c := range f.cmds {
+		if f.key(c) == key {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWindowsUninstallOfMissingValueIsFine(t *testing.T) {
 	u, _ := service.UninstallPlan("windows", `C:\Users\ann`)
-	r := &recorder{failing: "reg"} // the probe fails: nothing is registered
+	// The value is missing (the key can be read) and there is no old task.
+	r := &fakeWin{fail: map[string]bool{"reg-value": true, "task-query": true}}
 	var out strings.Builder
 	if err := service.UninstallWith(context.Background(), r, u, &out); err != nil {
 		t.Fatalf("already uninstalled must not fail: %v", err)
 	}
-	for _, c := range r.cmds {
-		if c[1] == "delete" {
-			t.Fatalf("delete ran for a missing value: %v", r.cmds)
-		}
+	if r.ran("reg-delete") || r.ran("task-delete") {
+		t.Fatalf("deleted something that is not there: %v", r.cmds)
 	}
 	if !strings.Contains(out.String(), "not installed") {
 		t.Fatalf("output %q", out.String())
 	}
 	// With the value present the delete runs, and its failure is reported.
-	r2 := &failOn{sub: "delete"}
+	r2 := &fakeWin{fail: map[string]bool{"reg-delete": true, "task-query": true}}
 	if err := service.UninstallWith(context.Background(), r2, u, io.Discard); err == nil {
 		t.Fatal("a failing delete must be reported")
+	}
+}
+
+func TestWindowsUninstallReportsWhatWasRemoved(t *testing.T) {
+	u, _ := service.UninstallPlan("windows", `C:\Users\ann`)
+	r := &fakeWin{}
+	var out strings.Builder
+	if err := service.UninstallWith(context.Background(), r, u, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !r.ran("reg-delete") || !r.ran("task-delete") {
+		t.Fatalf("both must be removed: %v", r.cmds)
+	}
+	if !hasCmd(r.cmds, "schtasks", "/Delete", "/TN", "sugar-it", "/F") || !hasCmd(r.cmds, "schtasks", "/Query", "/TN", "sugar-it") {
+		t.Fatalf("task commands: %v", r.cmds)
+	}
+	for _, want := range []string{"logon entry", "scheduled task"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q: %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "not installed") {
+		t.Errorf("claims not installed: %q", out.String())
+	}
+}
+
+func TestWindowsUninstallOldTaskNeedsAdministrator(t *testing.T) {
+	u, _ := service.UninstallPlan("windows", `C:\Users\ann`)
+	r := &fakeWin{fail: map[string]bool{"task-delete": true}}
+	var out strings.Builder
+	err := service.UninstallWith(context.Background(), r, u, &out)
+	if err == nil {
+		t.Fatal("a task that could not be deleted must not be reported as success")
+	}
+	for _, want := range []string{"administrator", "schtasks /Delete /TN sugar-it /F"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	if strings.Contains(out.String(), "Removed the scheduled task") {
+		t.Errorf("claims the task was removed: %q", out.String())
+	}
+}
+
+func TestWindowsUninstallUnreadableRegistryIsNotNotInstalled(t *testing.T) {
+	u, _ := service.UninstallPlan("windows", `C:\Users\ann`)
+	r := &fakeWin{fail: map[string]bool{"reg-value": true, "reg-key": true, "task-query": true}}
+	var out strings.Builder
+	if err := service.UninstallWith(context.Background(), r, u, &out); err == nil {
+		t.Fatal("an unreadable registry must be an error")
+	}
+	if strings.Contains(out.String(), "not installed") {
+		t.Fatalf("claims not installed: %q", out.String())
+	}
+}
+
+type fakeDaemon struct {
+	err   error
+	calls int
+}
+
+func (f *fakeDaemon) Shutdown(context.Context) error { f.calls++; return f.err }
+
+func TestStopDaemon(t *testing.T) {
+	ctx := context.Background()
+	var out strings.Builder
+	if err := service.StopDaemon(ctx, nil, nil, &out); err != nil || !strings.Contains(out.String(), "nothing to stop") {
+		t.Fatalf("none: %v %q", err, out.String())
+	}
+	out.Reset()
+	d := &fakeDaemon{}
+	waited := false
+	if err := service.StopDaemon(ctx, d, func(context.Context) error { waited = true; return nil }, &out); err != nil || d.calls != 1 || !waited || !strings.Contains(out.String(), "Stopped") {
+		t.Fatalf("stop: %v %q", err, out.String())
+	}
+	out.Reset()
+	d = &fakeDaemon{err: vfs.E(vfs.CodeInvalidRequest, "the daemon runs inside the desktop app")}
+	if err := service.StopDaemon(ctx, d, nil, &out); err != nil || !strings.Contains(out.String(), "when the app closes") {
+		t.Fatalf("in-process: %v %q", err, out.String())
+	}
+	out.Reset()
+	d = &fakeDaemon{err: errors.New("boom")}
+	if err := service.StopDaemon(ctx, d, nil, &out); err == nil {
+		t.Fatal("a failed shutdown must be reported")
 	}
 }
 

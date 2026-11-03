@@ -520,3 +520,113 @@ func TestMountConnectFailureStaysAnError(t *testing.T) {
 		t.Fatalf("%+v %v", res, err)
 	}
 }
+
+type okRunner struct{}
+
+func (okRunner) Run(context.Context, []string, string, io.Writer) error { return nil }
+
+// The real mount.Run prints a plan's notes; they must reach the window once
+// (in Notes), not again in Output, and macOS must not point at a terminal.
+func TestMountNotesAppearOnceAndNameTheAppsToken(t *testing.T) {
+	dir := t.TempDir()
+	a := newApp(t, dir)
+	a.startup(context.Background())
+	defer a.shutdown(context.Background())
+	a.mountRun = func(ctx context.Context, p mount.Plan, out io.Writer) error {
+		return mount.RunWith(ctx, okRunner{}, p, out)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		a.goos = goos
+		res, err := a.Mount("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Notes) == 0 {
+			t.Fatalf("%s: no notes", goos)
+		}
+		if strings.Contains(res.Output, res.Notes[0]) {
+			t.Errorf("%s: notes printed twice: output %q", goos, res.Output)
+		}
+		if strings.Contains(strings.Join(res.Notes, "\n"), "printed below") {
+			t.Errorf("%s: note points at a terminal: %q", goos, res.Notes)
+		}
+		u, err := a.Unmount("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range u.Notes {
+			if strings.Contains(u.Output, n) {
+				t.Errorf("%s: unmount notes printed twice: %q", goos, u.Output)
+			}
+		}
+	}
+}
+
+func windowsUninstallApp(t *testing.T, a *App) {
+	t.Helper()
+	a.goos = "windows"
+	a.home = t.TempDir()
+	a.svcUninstall = func(_ context.Context, _ service.Unit, out io.Writer) error {
+		out.Write([]byte("Removed the logon entry\n"))
+		return nil
+	}
+}
+
+func TestWindowsUninstallStopsAnExternalDaemon(t *testing.T) {
+	dir := t.TempDir()
+	startDaemon(t, dir)
+	a := newApp(t, dir)
+	a.startup(context.Background())
+	windowsUninstallApp(t, a)
+	res, err := a.UninstallService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output, "Asked the running daemon to stop") {
+		t.Errorf("output %q", res.Output)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := control.Discover(dir); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the external daemon is still running")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestWindowsUninstallLeavesTheAppsOwnDaemon(t *testing.T) {
+	dir := t.TempDir()
+	a := newApp(t, dir)
+	a.startup(context.Background())
+	defer a.shutdown(context.Background())
+	windowsUninstallApp(t, a)
+	res, err := a.UninstallService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output, "when the app closes") {
+		t.Errorf("output %q", res.Output)
+	}
+	if _, err := a.Status(); err != nil {
+		t.Errorf("the app's daemon must keep running: %v", err)
+	}
+}
+
+func TestLinuxUninstallDoesNotTouchTheDaemon(t *testing.T) {
+	dir := t.TempDir()
+	startDaemon(t, dir)
+	a := newApp(t, dir)
+	a.startup(context.Background())
+	a.goos = "linux"
+	a.home = t.TempDir()
+	a.svcUninstall = func(context.Context, service.Unit, io.Writer) error { return nil }
+	if _, err := a.UninstallService(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Status(); err != nil {
+		t.Errorf("the service manager stops its own process; the app must not: %v", err)
+	}
+}
