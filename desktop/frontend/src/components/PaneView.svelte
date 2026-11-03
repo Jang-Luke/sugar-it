@@ -2,8 +2,9 @@
   import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { ko } from '../ko'
   import { parseError, type Api, type ApiError, type Entry, type PeerStatus, type ShareInfo } from '../lib/api'
-  import { dropOperation, joinPath, planDrop, type Pane } from '../lib/panes'
-  import { AutoRefresher } from '../lib/refresh'
+  import { copyModifier, dropOperation, isMacPlatform, joinPath, planDrop, type Pane } from '../lib/panes'
+  import { APP_DRAG_TYPE, isAppDrag, staleDrag } from '../lib/drag'
+  import { AutoRefresher, pollAction } from '../lib/refresh'
   import { errorText } from '../lib/transfers'
   import { formatBytes, formatTime } from '../lib/format'
   import { EntryLoader } from '../lib/listing'
@@ -32,6 +33,8 @@
   let error: ApiError | null = null
   let bgError: ApiError | null = null
   let loading = false
+  let sharesFailed = false // the last share listing failed; polling tries again
+  const mac = isMacPlatform(navigator.platform)
   let sharesSeq = 0 // drops share lists that arrive after a newer request
   // Rows and selection are emptied the moment a load starts; see EntryLoader.
   const loader = new EntryLoader(() => {
@@ -62,6 +65,7 @@
     selected = []
     loading = true
     error = null
+    sharesFailed = false
     try {
       const s = (await api.listShares(pane.peer)) ?? []
       if (my !== sharesSeq) return
@@ -74,6 +78,7 @@
     } catch (e) {
       if (my !== sharesSeq) return
       shares = []
+      sharesFailed = true
       error = parseError(e)
       loading = false
     }
@@ -93,17 +98,24 @@
 
   /** Reload what is shown, keeping the folder. */
   export function refresh() {
+    refresher.resetBackoff() // a manual refresh is not held back by a slow poll
     return shares.length === 0 || error ? loadShares() : loadEntries()
   }
 
   /** Reload the same folder silently; see EntryLoader.refresh. */
   async function backgroundRefresh() {
-    if (pane.share === '') return
+    const action = pollAction({ shareCount: shares.length, sharesFailed, share: pane.share })
+    if (action === 'none') return
+    if (action === 'shares') return loadShares()
     const { peer, share, path } = pane
     await loader.refresh(
       () => api.list(peer, share, path),
       () => selected,
       () => pane.peer === peer && pane.share === share && pane.path === path,
+      // A reply that arrives during a drag or while a dialog or menu is open
+      // would put other rows under the pointer or the dialog; the next poll
+      // brings it again.
+      () => dragSrc === null && !paused,
     )
   }
 
@@ -114,8 +126,7 @@
       root?.offsetParent !== null && // not on another tab
       !paused &&
       dragSrc === null &&
-      pane.share !== '' &&
-      shares.length > 0 &&
+      pollAction({ shareCount: shares.length, sharesFailed, share: pane.share }) !== 'none' &&
       !loading,
   })
 
@@ -180,6 +191,7 @@
 
   function dragStart(ev: DragEvent, e: Entry) {
     if (!selected.includes(e)) selected = [e]
+    ev.dataTransfer?.setData(APP_DRAG_TYPE, '1')
     ev.dataTransfer?.setData('text/plain', e.Name)
     if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'copyMove'
     dispatch('dragstart', selected)
@@ -187,10 +199,10 @@
 
   /** What dropping the current drag on this pane, or on one of its rows, would do. */
   function plan(row: Entry | null, ev: DragEvent) {
-    if (!dragSrc) return null
+    if (!dragSrc || !isAppDrag(ev.dataTransfer?.types)) return null // not ours: Explorer files, text
     const p = planDrop(dragSrc, dragEntries, pane, row)
     if (!p.ok) return null
-    const op = dropOperation(dragSrc, p.dest, { shift: ev.shiftKey, ctrl: ev.ctrlKey })
+    const op = dropOperation(dragSrc, p.dest, { shift: ev.shiftKey, ctrl: copyModifier(ev, mac) })
     return { p, op }
   }
 
@@ -234,7 +246,7 @@
     clearDrag()
     if (!r) return
     ev.preventDefault()
-    dispatch('drop', { shift: ev.shiftKey, ctrl: ev.ctrlKey, over: row })
+    dispatch('drop', { shift: ev.shiftKey, ctrl: copyModifier(ev, mac), over: row })
   }
 
   function context(ev: MouseEvent, row: Entry | null) {
@@ -242,6 +254,17 @@
     ev.stopPropagation()
     dispatch('activate')
     dispatch('contextmenu', { x: ev.clientX, y: ev.clientY, row })
+  }
+
+  // The row that started a drag can leave the page while the list scrolls, and
+  // its dragend then reaches nobody. Catch it on the window, and notice a
+  // mouse that moves with no button down while a drag is still recorded.
+  function endDrag() {
+    clearDrag()
+    if (dragSrc !== null) dispatch('dragend')
+  }
+  function mouseMoved(ev: MouseEvent) {
+    if (staleDrag(dragSrc !== null, ev.buttons)) endDrag()
   }
 
   function visible() {
@@ -252,10 +275,14 @@
     void loadShares()
     refresher.start()
     document.addEventListener('visibilitychange', visible)
+    window.addEventListener('dragend', endDrag)
+    window.addEventListener('mousemove', mouseMoved)
   })
   onDestroy(() => {
     refresher.stop()
     document.removeEventListener('visibilitychange', visible)
+    window.removeEventListener('dragend', endDrag)
+    window.removeEventListener('mousemove', mouseMoved)
   })
 
   $: crumbs = pane.path === '' ? [] : pane.path.split('/')

@@ -9,7 +9,8 @@ background; `sugar-it stop` ends it; its output is in `daemon.log` in the config
 directory), add a share
 (`sugar-it share add docs <folder>`), and pair at least one other host so a
 peer folder exists. The WebDAV user is `sugar-it`; the password is the control
-token, which `sugar-it mount` prints when the OS asks for it.
+token. On macOS `sugar-it mount` prints it when Finder asks; on Linux it is
+passed to `gio` on stdin; on Windows it is passed to the API and never shown.
 
 ## Linux (checked on the build host: not possible there)
 
@@ -68,10 +69,15 @@ sugar-it mount --drive Z:
    note; raise it as printed to copy larger files, up to 4294967295 bytes.
 3. No password prompt appears: the command calls `WNetUseConnectionW` (mpr.dll)
    with the remote name `\\127.0.0.1@7445\DavWWWRoot`, user `sugar-it` and the
-   token as the password argument, and prints `Mounted on <drive>`. Not yet
-   run on Windows. Check these failures give a clear message: WebClient
+   token as the password argument, and prints `Mounted on <drive>`. Run on
+   Windows 11 over SSH, from an administrator session, with `BasicAuthLevel` 2:
+   a chosen and an automatic drive connected, then listing, reading, writing,
+   deleting and unmount worked. Not run: a normal (non-administrator) session
+   and a desktop session. Check these failures give a clear message: WebClient
    stopped or disabled, a drive letter already in use (85), a wrong token (5,
-   86, 1326), and a session without network logon such as SSH (1244).
+   86, 1326). Error 1244 (no logon session that may connect a network drive)
+   was not seen over SSH; it is the message for a session that cannot, if one
+   is found.
 4. Expected: drive `Z:` in Explorer shows the peers; copy a file in and out.
    Without `--drive` Windows picks a free letter and the command reports it.
    If this remote name form is rejected, the `http://127.0.0.1:7445/` form is
@@ -140,7 +146,10 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     "토큰 보기" for the password (a native dialog; the token appears nowhere
     else in the window). Windows: no token is shown or typed; the app calls
     `WNetUseConnectionW` itself and the result box names the assigned drive.
-    Not yet run on Windows. With `BasicAuthLevel` below 2 the card explains in
+    The same call was run from the CLI on Windows 11 (see Windows above); the
+    app's button and the Hosts card have not been confirmed since the last fixes.
+    The result box shows the output decoded from the console code page (Korean
+    Windows writes CP949), not raw bytes. With `BasicAuthLevel` below 2 the card explains in
     Korean and lists the `reg add` commands (needing an administrator prompt)
     instead of showing an error; other failures show "마운트하지 못했습니다."
     with the detail.
@@ -149,13 +158,23 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     logon (the card says so in Korean). Check the value with `reg query
     HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v sugar-it`, log
     out and in, and see whether the daemon runs and whether a console window
-    appears (expected only for `sugar-it.exe`). "서비스 제거" twice: the second
-    run must not fail. A failed install shows "서비스를 설치하거나 제거하지
-    못했습니다." plus the detail. Not yet run on Windows.
+    appears (expected only for `sugar-it.exe`). The Run value was written with
+    correct quoting and removed again from an administrator session over SSH;
+    the logon start, a non-administrator and the app's button are not run.
+    "서비스 제거" removes the value and, if the v0.1.0 scheduled task `sugar-it`
+    exists, deletes it (`schtasks /Query /TN sugar-it`, `/Delete /TN sugar-it
+    /F`); without elevation that fails and the result shows the command to run
+    as administrator. It then asks a daemon answering for this config directory
+    to stop and says so; a daemon inside the app is left running until the app
+    closes. Run it twice: the second run says nothing was installed and must
+    not fail. A failed install shows "서비스를 설치하거나 제거하지 못했습니다."
+    plus the detail. Not yet run on Windows: the scheduled-task removal and the
+    daemon stop.
     Other systems: "서비스 설치" installs the per-user service (Linux: `systemctl --user status
     sugar-it`). While the app itself runs the daemon, the service fails to take
     the config-directory lock and retries every 5 seconds until the app closes.
-    "서비스 제거" asks first, then stops and removes the service.
+    "서비스 제거" asks first, then stops and removes the service (systemctl
+    disable --now on Linux, launchctl unload on macOS).
 12. Kill the in-process daemon's port by starting another process on it before
     launch: the window shows the start error banner instead of crashing.
 13. Automatic refresh (two panes, two hosts or two shares; not yet rendered).
@@ -184,16 +203,25 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     host and share (the other pane, or a folder row) moves; dropping on another
     host or share copies. The pointer and the small label beside it say
     "이동 → ..." or "복사 → ..." and match what happens. Shift always moves,
-    Ctrl always copies, both held copies. The "이름이 겹치면" selector still
+    Ctrl always copies (Option on macOS, where Ctrl+click is a context click),
+    both held copies. The "이름이 겹치면" selector still
     applies.
 15. Drop onto a folder (not yet rendered). Hovering a folder row outlines it;
     dropping puts the entries inside that folder, not in the pane's folder.
     Dropping on empty space or on a file row targets the pane's own folder.
-    Also drag onto a folder row in the same pane. These are refused with a
-    message and start no job: a folder onto itself or into its own subfolder
+    Also drag onto a folder row in the same pane. These are refused and start
+    no job: the drop is not accepted (the pointer shows it is refused) and no
+    message appears, because `dragover` rejects them: a folder onto itself or into its own subfolder
     (also through the other pane), and entries dropped on the folder they
     already sit in. Change folders in the middle of starting a large drop: the
     jobs still go to the folder dropped on.
+    Refresh during a drag: while dragging, and while a dialog or menu is open,
+    a listing that changed meanwhile is not applied; the hint and the drop go to
+    the same folder, and the list updates after the drag ends. Dragging a file
+    from Explorer into a pane does nothing (only drags started inside the app
+    are accepted). Start a drag, scroll the source row out of view, release
+    outside the pane: polling resumes within a few seconds and no stale move is
+    armed.
 16. Context menu (not yet rendered). Right click a row: the native menu does
     not appear; "열기" (folders only, one item), "다른 패널로 복사", "다른 패널로
     이동", "이름 변경" (one item only) and "삭제". Right click an unselected row

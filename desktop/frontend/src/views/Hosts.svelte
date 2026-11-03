@@ -36,7 +36,7 @@
     ? { title: ko.hosts.removeTitle, message: ko.hosts.removeMessage, label: ko.hosts.removeConfirm }
     : confirm?.kind === 'share'
       ? { title: ko.hosts.removeShareTitle, message: ko.hosts.removeShareMessage, label: ko.hosts.removeShareConfirm }
-      : { title: ko.hosts.serviceUninstallTitle, message: ko.hosts.serviceUninstallMessage, label: ko.hosts.serviceUninstallConfirm }
+      : { title: ko.hosts.serviceUninstallTitle, message: ko.hosts.serviceUninstallMessage(platform), label: ko.hosts.serviceUninstallConfirm }
 
   $: peers = status?.Peers ?? []
   $: platform = state?.Platform ?? ''
@@ -142,7 +142,7 @@
       confirm = null
       if (r) {
         serviceOutput = r.Output
-        info = ko.hosts.serviceUninstalled
+        info = ko.hosts.serviceUninstalled(platform)
       }
       return
     }
@@ -169,6 +169,7 @@
       const r = await api.mount(drive.trim())
       mountResult = r
       mountView = describeMount(r)
+      if (r.Drive) drive = r.Drive // so Unmount knows which drive an automatic mount took
       if (mountView.kind === 'mounted') info = mountView.message
     } catch (e) {
       mountError = mountFailure(e)

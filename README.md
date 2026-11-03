@@ -91,7 +91,7 @@ sugar-it jobs --help                  # follow and control transfers
 
 Paths are `<peer>:<share>/<path>`; `local` always means this host. Other
 commands: `status`, `stop`, `mkdir`, `rename`, `rm`, `peer remove`, `mount`,
-`unmount`, `service install`. Every command has `--help`.
+`unmount`, `service install`, `service uninstall`. Every command has `--help`.
 
 `sugar-it daemon` detaches: it starts the daemon in the background, waits until
 it answers (up to 15 seconds), prints its addresses and the log path, and
@@ -141,7 +141,8 @@ canceled; files already moved stay moved.
 
 `sugar-it mount` exposes the whole mesh through the local WebDAV server and
 asks the OS to mount it. The WebDAV user is `sugar-it` and the password is the
-control token, which the command prints when the OS asks for it.
+control token. On macOS the command prints it for Finder's prompt; on Linux
+it goes to `gio` on stdin; on Windows it is passed to the API and never shown.
 
 Moving or copying onto an existing file replaces it atomically, keeping the old
 file if anything fails. Moving or copying a folder onto something that exists,
@@ -207,6 +208,12 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   CREATE_NO_WINDOW`), a start from the GUI-subsystem `sugar-it-desktop.exe`, and
   whether `sugar-it.exe` still flashes a console at logon are not verified. It
   was run on Linux only.
+- `sugar-it service uninstall` on Windows: removing the v0.1.0 scheduled task
+  (and the error when it needs an administrator) and stopping a running daemon
+  were tested only with fake commands. On Linux and macOS uninstall stops the
+  service; on Windows removing the Run value cannot stop a process, so the
+  command asks the daemon to stop, and a daemon inside the desktop app keeps
+  running until the app closes.
 - `sugar-it service install` on Windows actually starting the daemon at logon.
   The Run key value was written with correct quoting and removed again, from an
   administrator session. A non-administrator has not been tried.

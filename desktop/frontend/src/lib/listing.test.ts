@@ -68,6 +68,43 @@ describe('EntryLoader', () => {
   })
 })
 
+describe('EntryLoader.refresh discards while a drag or dialog holds the rows', () => {
+  it('discards a reply when apply() is false, then applies the next one', async () => {
+    const ld = new EntryLoader(() => {})
+    await ld.load(async () => [e('alpha', 'dir'), e('zeta', 'dir')])
+    const before = ld.entries
+    let hold = true
+    const get = () => [] as Entry[]
+    const r1 = await ld.refresh(async () => [e('aaa-new', 'dir'), e('alpha', 'dir'), e('zeta', 'dir')], get, () => true, () => !hold)
+    expect(r1).toBe('discarded')
+    expect(ld.entries).toBe(before)
+    hold = false
+    const r2 = await ld.refresh(async () => [e('aaa-new', 'dir'), e('alpha', 'dir'), e('zeta', 'dir')], get, () => true, () => !hold)
+    expect(r2).toBe('replaced')
+    expect(ld.entries.map((x) => x.Name)).toEqual(['aaa-new', 'alpha', 'zeta'])
+  })
+
+  it('checks apply() when the reply arrives, not when the request starts', async () => {
+    const ld = new EntryLoader(() => {})
+    await ld.load(async () => [e('alpha', 'dir')])
+    const d = deferred<Entry[]>()
+    let dragging = false
+    const p = ld.refresh(() => d.promise, () => [], () => true, () => !dragging)
+    dragging = true // a drag starts while the request is in flight
+    d.resolve([e('aaa-new', 'dir'), e('alpha', 'dir')])
+    expect(await p).toBe('discarded')
+    expect(ld.entries.map((x) => x.Name)).toEqual(['alpha'])
+  })
+
+  it('does not record a failure while discarding', async () => {
+    const ld = new EntryLoader(() => {})
+    await ld.load(async () => [e('a')])
+    const r = await ld.refresh(async () => { throw 'boom' }, () => [], () => true, () => false)
+    expect(r).toBe('discarded')
+    expect(ld.bgError).toBeNull()
+  })
+})
+
 describe('sortEntries', () => {
   it('puts folders first, then sorts by Korean collation', () => {
     const out = sortEntries([e('나'), e('가', 'dir'), e('다'), e('나나', 'dir'), e('가')])
@@ -120,7 +157,7 @@ describe('EntryLoader.refresh (background)', () => {
     const ld = new EntryLoader(() => {})
     await ld.load(async () => [e('a'), e('b'), e('c')])
     const picked = [ld.entries[0], ld.entries[2]]
-    await ld.refresh(async () => [e('a'), e('c', 'dir'), e('d')], () => picked)
+    await ld.refresh(async () => [e('a'), { ...e('c'), Size: 5 }, e('d')], () => picked)
     expect(ld.selected.map((x) => x.Name).sort()).toEqual(['a', 'c'])
     // the selection holds the new row objects, so identity checks in the view still work
     for (const s of ld.selected) expect(ld.entries).toContain(s)
@@ -252,5 +289,27 @@ describe('sameListing and reconcileSelection', () => {
   it('keeps order of the selection and ignores duplicates', () => {
     const rows = [e('a'), e('b'), e('c')]
     expect(reconcileSelection([e('c'), e('a'), e('gone')], rows).map((x) => x.Name)).toEqual(['c', 'a'])
+  })
+})
+
+describe('reconcileSelection when an entry changes type', () => {
+  const f = (Name: string, Type: Entry['Type'], Size = 0, ETag = ''): Entry => ({ ...e(Name, Type), Size, ETag })
+  it('drops a selected file that another host replaced with a folder of the same name', () => {
+    expect(reconcileSelection([f('report', 'file')], [f('report', 'dir')])).toEqual([])
+  })
+  it('drops a selected folder replaced by a file', () => {
+    expect(reconcileSelection([f('x', 'dir')], [f('x', 'file')])).toEqual([])
+  })
+  it('keeps an entry whose size or ETag changed but whose type did not', () => {
+    const now = f('a', 'file', 9, 'new')
+    expect(reconcileSelection([f('a', 'file', 1, 'old')], [now])).toEqual([now])
+  })
+  it('refresh: a type change empties the selection', async () => {
+    const ld = new EntryLoader(() => {})
+    await ld.load(async () => [f('report', 'file')])
+    const sel = [ld.entries[0]]
+    await ld.refresh(async () => [f('report', 'dir')], () => sel)
+    expect(ld.entries[0].Type).toBe('dir')
+    expect(ld.selected).toEqual([])
   })
 })

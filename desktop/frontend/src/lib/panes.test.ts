@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canDrop, dropOperation, planDrop, snapshotSelection, targetOf, type Pane } from './panes'
+import { canDrop, copyModifier, deletePrompt, dropOperation, planDrop, snapshotSelection, targetOf, type Pane } from './panes'
 import type { Entry } from './api'
 
 const pane = (over: Partial<Pane> = {}): Pane => ({ id: 'left', peer: 'local', share: 'docs', path: '', ...over })
@@ -154,5 +154,37 @@ describe('planDrop', () => {
     const r = planDrop(src, [entry('x')], dst, folder('sub'))
     dst.path = 'zzz'
     if (r.ok) expect(r.dest.path).toBe('b/sub')
+  })
+})
+
+describe('copyModifier', () => {
+  it('is Ctrl elsewhere', () => {
+    expect(copyModifier({ ctrlKey: true, altKey: false }, false)).toBe(true)
+    expect(copyModifier({ ctrlKey: false, altKey: true }, false)).toBe(false)
+  })
+  it('is Option on macOS, where Ctrl+click is a context click', () => {
+    expect(copyModifier({ ctrlKey: false, altKey: true }, true)).toBe(true)
+    expect(copyModifier({ ctrlKey: true, altKey: false }, true)).toBe(false)
+  })
+})
+
+describe('deletePrompt', () => {
+  it('marks folders and says their contents go too', () => {
+    const p = deletePrompt([entry('a.txt'), entry('report', 'dir')])
+    expect(p.names[0]).toBe('a.txt')
+    expect(p.names[1]).not.toBe('report')
+    expect(p.names[1]).toContain('report')
+    expect(p.hasFolder).toBe(true)
+  })
+  it('has no folder note for files only', () => {
+    const p = deletePrompt([entry('a'), entry('b')])
+    expect(p).toEqual({ names: ['a', 'b'], hasFolder: false })
+  })
+  it('shows at most five names but looks at all entries for folders', () => {
+    const es = [1, 2, 3, 4, 5, 6].map((i) => entry('f' + i))
+    es.push(entry('d', 'dir'))
+    const p = deletePrompt(es)
+    expect(p.names).toHaveLength(5)
+    expect(p.hasFolder).toBe(true)
   })
 })

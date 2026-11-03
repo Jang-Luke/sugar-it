@@ -81,6 +81,8 @@ export const ko = {
     },
     dragHint:
       '끌어 놓으면 같은 호스트의 같은 공유 안에서는 이동, 그 밖에는 복사합니다. Shift를 누르고 놓으면 항상 이동, Ctrl을 누르고 놓으면 항상 복사합니다. 폴더 위에 놓으면 그 폴더 안으로 들어갑니다.',
+    dragHintMac:
+      '끌어 놓으면 같은 호스트의 같은 공유 안에서는 이동, 그 밖에는 복사합니다. Shift를 누르고 놓으면 항상 이동, Option을 누르고 놓으면 항상 복사합니다. 폴더 위에 놓으면 그 폴더 안으로 들어갑니다.',
     dropHint: (op: string, where: string) => `${op} → ${where}`,
     dropSelf: '폴더를 자기 자신이나 그 하위 폴더로 옮길 수 없습니다.',
     refreshFailed: '목록을 새로 고치지 못했습니다. 보이는 목록은 이전 상태일 수 있습니다.',
@@ -98,6 +100,8 @@ export const ko = {
     opMove: '이동',
     deleteTitle: '삭제 확인',
     deleteMessage: '다음 항목을 삭제합니다. 되돌릴 수 없습니다.',
+    deleteMessageFolders: '다음 항목을 삭제합니다. 폴더는 안에 든 모든 파일과 폴더까지 함께 삭제됩니다. 되돌릴 수 없습니다.',
+    folderMark: (name: string) => `${name}/ (폴더)`,
     deleteConfirm: '삭제',
     deleteMore: (n: number) => `외 ${n}개`,
     renameTitle: '이름 변경',
@@ -209,9 +213,17 @@ export const ko = {
     serviceNextLogon: 'Windows에서는 다음 로그인부터 적용됩니다. 지금 바로 시작하지 않으며, 이 앱이 공유를 실행 중이면 앱을 닫을 때까지 앱이 계속 실행합니다.',
     serviceUninstall: '서비스 제거',
     serviceUninstallTitle: '서비스 제거',
-    serviceUninstallMessage: '백그라운드 서비스를 멈추고 제거합니다. 공유한 폴더와 설정은 그대로 남습니다.',
+    serviceUninstallMessage: (platform: string) =>
+      platform === 'windows'
+        ? '로그인할 때 실행되는 항목(그리고 v0.1.0이 만든 예약 작업이 있으면 그것도)을 제거하고, 이 설정 폴더로 실행 중인 공유 서비스가 있으면 멈춥니다. 이 앱이 공유를 실행 중이면 앱을 닫을 때 멈춥니다. 예약 작업을 지우려면 관리자 권한이 필요할 수 있습니다. 공유한 폴더와 설정은 그대로 남습니다.'
+        : platform === 'darwin'
+          ? 'LaunchAgent를 내려 서비스를 멈추고 제거합니다. 공유한 폴더와 설정은 그대로 남습니다.'
+          : 'systemd 사용자 서비스를 멈추고 제거합니다. 공유한 폴더와 설정은 그대로 남습니다.',
     serviceUninstallConfirm: '제거',
-    serviceUninstalled: '서비스를 제거했습니다. 이 앱이 서비스에 연결되어 있었다면 앱을 다시 시작하세요.',
+    serviceUninstalled: (platform: string) =>
+      platform === 'windows'
+        ? '로그인 항목을 제거했습니다. 서비스가 멈췄는지는 아래 결과를 확인하세요. 이 앱이 서비스에 연결되어 있었다면 앱을 다시 시작하세요.'
+        : '서비스를 멈추고 제거했습니다. 이 앱이 서비스에 연결되어 있었다면 앱을 다시 시작하세요.',
     serviceWaitsForApp: '지금은 이 앱이 공유를 실행하고 있으므로 서비스는 앱을 닫은 뒤에 공유를 이어받습니다.',
     output: '실행 결과',
     notes: '안내',

@@ -100,3 +100,12 @@ SDD 작업 기록에서 옮긴 목록이다. 작업 기록은 브랜치 완료 �
 - Task 13: minor (deferred): release.yml v* tag filter matches vendor-x, no main check; desktop jobs need cli; nfpm maintainer lacks Name <email>; newRoot assigns global control.Version; README lists go test -race as verified without flake caveat
 - Final: minor (deferred): queued jobs of a removed Origin can start before their Cancel arrives (manager.go:358); MOVE overwrite widens permissions 0600 to 0664 (davfs.go:715); parts retained for failed jobs of a removed Origin (manager.go:270); RemoteFS.Put client stalls with a stalled reader; WebDAV GET open to a just-removed host not stopped
 - Final: minor (deferred): Important 6 persistent source read error leaves job waiting_peer forever; review Minors 6-9, 11-13: remote recursive delete timeout reports failure while continuing; jobs show omits hosts; finished jobs never pruned; possible duplicate job on submit timeout race; Windows backslash in noLinks; desktop start edge cases; no arm64 Linux or Windows desktop asset; x/net 412 on a lock holder's MOVE onto its own locked file; x/net treats MOVE with no Overwrite header as F
+
+## 미룬 항목 (v0.1.1 리뷰)
+
+- `WNetGetLastError` expansion: the extended error text a failed `WNetUseConnectionW` can carry is not read.
+- Connect ignores ctx: the Windows connection call cannot be canceled by the context.
+- The Run value length limit is not checked when the command line is long.
+- Go notes and command output are English in the Korean GUI.
+- Pre-existing: a pane keeps its old path when the share changes in the share list.
+- Windows uninstall cannot tell "scheduled task absent" from "query failed" (the schtasks message is localized); a failed query is treated as absent.

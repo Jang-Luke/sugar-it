@@ -31,6 +31,12 @@ export class AutoRefresher {
     this.schedule(Date.now() + (this.o.baseMs ?? POLL_MS))
   }
 
+  /** A manual refresh: forget how slow the last listing was. */
+  resetBackoff() {
+    this.lastEnd = 0
+    this.lastDur = 0
+  }
+
   stop() {
     this.started = false
     if (this.timer !== undefined) clearTimeout(this.timer)
@@ -118,4 +124,14 @@ export function jobsChanged(
   let changed = next.size !== prev.size
   if (!changed) for (const [k, v] of next) if (prev.get(k) !== v) changed = true
   return { changed, next }
+}
+
+/**
+ * What a background poll of a pane does: list the shares again when that
+ * failed (so a host that was offline comes back by itself), reload the folder
+ * when a share is chosen, nothing otherwise.
+ */
+export function pollAction(p: { shareCount: number; sharesFailed: boolean; share: string }): 'shares' | 'entries' | 'none' {
+  if (p.shareCount === 0) return p.sharesFailed ? 'shares' : 'none'
+  return p.share === '' ? 'none' : 'entries'
 }

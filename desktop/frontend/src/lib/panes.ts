@@ -1,4 +1,5 @@
 import type { Entry } from './api'
+import { ko } from '../ko'
 
 /** One side of the file view: a host, a share on it and a folder inside. */
 export interface Pane {
@@ -77,4 +78,28 @@ export function planDrop(src: Pane, entries: Entry[], dst: Pane, over?: Entry | 
     if (dest.path === src.path) return { ok: false, reason: 'noop' }
   }
   return { ok: true, dest, target: targetOf(dest) }
+}
+
+/**
+ * Whether the copy key is held: Ctrl, except on macOS where Ctrl+click is a
+ * context click and Option is the copy key.
+ */
+export function copyModifier(ev: { ctrlKey: boolean; altKey: boolean }, mac: boolean): boolean {
+  return mac ? ev.altKey : ev.ctrlKey
+}
+
+/** Whether the platform string (navigator.platform) is a Mac. */
+export function isMacPlatform(platform: string): boolean {
+  return /^Mac/i.test(platform)
+}
+
+/**
+ * What the delete dialog shows: at most five names, folders marked, and
+ * whether any of all the entries is a folder (its contents go too).
+ */
+export function deletePrompt(entries: Entry[]): { names: string[]; hasFolder: boolean } {
+  return {
+    names: entries.slice(0, 5).map((e) => (e.Type === 'dir' ? ko.files.folderMark(e.Name) : e.Name)),
+    hasFolder: entries.some((e) => e.Type === 'dir'),
+  }
 }

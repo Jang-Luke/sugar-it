@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte'
   import { ko } from '../ko'
   import { parseError, type Api, type ApiError, type Conflict, type Entry, type Job, type PeerStatus } from '../lib/api'
-  import { dropOperation, joinPath, planDrop, snapshotSelection, targetOf, type DropRefusal, type Pane } from '../lib/panes'
+  import { deletePrompt, isMacPlatform, dropOperation, joinPath, planDrop, snapshotSelection, targetOf, type DropRefusal, type Pane } from '../lib/panes'
   import { actionStates, contextSelection } from '../lib/menu'
   import { jobsChanged } from '../lib/refresh'
   import { errorText } from '../lib/transfers'
@@ -238,7 +238,7 @@
   }
 
   $: paused = dialog !== null || menu !== null
-  $: shownNames = (dialog?.entries ?? []).slice(0, 5).map((e) => e.Name)
+  $: prompt = deletePrompt(dialog?.entries ?? [])
 </script>
 
 <div class="files">
@@ -301,7 +301,7 @@
       on:contextmenu={(e) => openMenu('right', e.detail)}
     />
   </div>
-  <div class="muted hint">{ko.files.dragHint}</div>
+  <div class="muted hint">{isMacPlatform(navigator.platform) ? ko.files.dragHintMac : ko.files.dragHint}</div>
 </div>
 
 {#if menu}
@@ -311,8 +311,8 @@
 {#if dialog?.kind === 'delete'}
   <Dialog
     title={ko.files.deleteTitle}
-    message={ko.files.deleteMessage}
-    names={shownNames}
+    message={prompt.hasFolder ? ko.files.deleteMessageFolders : ko.files.deleteMessage}
+    names={prompt.names}
     extra={dialog.entries.length > 5 ? ko.files.deleteMore(dialog.entries.length - 5) : ''}
     confirmLabel={ko.files.deleteConfirm}
     danger

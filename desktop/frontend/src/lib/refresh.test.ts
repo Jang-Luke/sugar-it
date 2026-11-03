@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AutoRefresher, jobSignatures, jobsChanged, nextDelay, touchesPane } from './refresh'
+import { AutoRefresher, jobSignatures, jobsChanged, nextDelay, pollAction, touchesPane } from './refresh'
 import type { Job } from './api'
 import type { Pane } from './panes'
 
@@ -177,5 +177,68 @@ describe('jobsChanged', () => {
   it('keys by host and id so equal ids on two hosts stay apart', () => {
     const sig = jobSignatures([job('1', { Host: 'a' }), job('1', { Host: 'b' })], () => true)
     expect(sig.size).toBe(2)
+  })
+})
+
+describe('manual refresh resets the backoff', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('polls again after 3 s, not ten times the slow listing, once reset', async () => {
+    const calls: number[] = []
+    const t0 = Date.now()
+    const r = new AutoRefresher({
+      run: async () => {
+        calls.push(Date.now() - t0)
+        await new Promise((res) => setTimeout(res, 2000))
+      },
+      canRun: () => true,
+    })
+    r.start()
+    await vi.advanceTimersByTimeAsync(3000) // runs 3000..5000
+    await vi.advanceTimersByTimeAsync(2100) // t = 5100, next would be 25000
+    r.resetBackoff()
+    r.request()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(calls).toEqual([3000, 5100])
+    r.stop()
+  })
+
+  it('the regular delay after a run that follows a reset is based on that run only', async () => {
+    let dur = 2000
+    const calls: number[] = []
+    const t0 = Date.now()
+    const r = new AutoRefresher({
+      run: async () => {
+        calls.push(Date.now() - t0)
+        await new Promise((res) => setTimeout(res, dur))
+      },
+      canRun: () => true,
+    })
+    r.start()
+    await vi.advanceTimersByTimeAsync(3000)
+    await vi.advanceTimersByTimeAsync(2100)
+    dur = 10
+    r.resetBackoff()
+    r.request()
+    await vi.advanceTimersByTimeAsync(3200) // ran at 5100, ends 5110, next at 8110
+    expect(calls).toEqual([3000, 5100, 8110].slice(0, calls.length))
+    expect(calls.length).toBe(3)
+    r.stop()
+  })
+})
+
+describe('pollAction', () => {
+  it('lists the shares again in the background when the share listing failed', () => {
+    expect(pollAction({ shareCount: 0, sharesFailed: true, share: '' })).toBe('shares')
+  })
+  it('does nothing for a host that simply has no shares', () => {
+    expect(pollAction({ shareCount: 0, sharesFailed: false, share: '' })).toBe('none')
+  })
+  it('does nothing while no share is chosen', () => {
+    expect(pollAction({ shareCount: 2, sharesFailed: false, share: '' })).toBe('none')
+  })
+  it('reloads the folder otherwise', () => {
+    expect(pollAction({ shareCount: 2, sharesFailed: false, share: 's' })).toBe('entries')
   })
 })

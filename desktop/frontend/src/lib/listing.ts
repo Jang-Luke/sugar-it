@@ -40,12 +40,16 @@ export class EntryLoader {
    * ('discarded') if a navigation, load or invalidate happened since the
    * request, or if `isCurrent` says the pane is no longer on the folder asked
    * for; so it can never bring back rows of a folder the user has left.
-   * `getSelected` is read when the reply arrives.
+   * `getSelected` is read when the reply arrives. `apply`, also read when the
+   * reply arrives, says whether rows may change now: while a drag or a dialog
+   * or menu holds them it is false and the reply is dropped whole ('discarded');
+   * the next poll fetches it again.
    */
   async refresh(
     fetch: () => Promise<Entry[] | null>,
     getSelected: () => Entry[],
     isCurrent: () => boolean = () => true,
+    apply: () => boolean = () => true,
   ): Promise<'replaced' | 'same' | 'failed' | 'discarded'> {
     if (this.loading) return 'discarded'
     const my = this.seq
@@ -53,13 +57,13 @@ export class EntryLoader {
     try {
       es = sortEntries((await fetch()) ?? [])
     } catch (e) {
-      if (my !== this.seq || !isCurrent()) return 'discarded'
+      if (my !== this.seq || !isCurrent() || !apply()) return 'discarded'
       this.selected = getSelected()
       if (this.error === null) this.bgError = parseError(e)
       this.onChange()
       return 'failed'
     }
-    if (my !== this.seq || !isCurrent()) return 'discarded'
+    if (my !== this.seq || !isCurrent() || !apply()) return 'discarded'
     this.selected = getSelected()
     const hadError = this.error !== null || this.bgError !== null
     this.error = null
@@ -108,7 +112,13 @@ export function sameListing(a: Entry[], b: Entry[]): boolean {
   return true
 }
 
-/** The rows of `rows` whose names were selected, in the selection's order. */
+/**
+ * The rows of `rows` whose names were selected, in the selection's order. A row
+ * whose type differs from the selected entry's is a different thing that took
+ * the name (a file replaced by a folder), so it is not selected: a delete must
+ * never turn recursive behind the user's back. Size or ETag changes of the
+ * same type keep the selection.
+ */
 export function reconcileSelection(selected: Entry[], rows: Entry[]): Entry[] {
   if (selected.length === 0) return []
   const byName = new Map(rows.map((r) => [r.Name, r]))
@@ -116,7 +126,7 @@ export function reconcileSelection(selected: Entry[], rows: Entry[]): Entry[] {
   const out: Entry[] = []
   for (const s of selected) {
     const r = byName.get(s.Name)
-    if (r && !seen.has(r.Name)) {
+    if (r && r.Type === s.Type && !seen.has(r.Name)) {
       seen.add(r.Name)
       out.push(r)
     }
