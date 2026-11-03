@@ -48,6 +48,23 @@ func (n *Node) Client(peerID string) (*peerapi.Client, error) {
 	return ce.c, nil
 }
 
+// Route is Client for operations on a peer's data: it refuses a peer that
+// speaks an incompatible protocol, which Client does not so that health
+// checks can still see it recover.
+func (n *Node) Route(peerID string) (*peerapi.Client, error) {
+	cl, err := n.Client(peerID)
+	if err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	incompatible := n.status[peerID].incompatible
+	n.mu.Unlock()
+	if incompatible {
+		return nil, vfs.E(vfs.CodePeerIncompatible, "peer runs an incompatible protocol version")
+	}
+	return cl, nil
+}
+
 // Shares lists a peer's shares ("local" for this host's).
 func (n *Node) Shares(ctx context.Context, peer string) ([]peerapi.ShareInfo, error) {
 	id, local, err := n.ResolvePeer(peer)
@@ -57,7 +74,7 @@ func (n *Node) Shares(ctx context.Context, peer string) ([]peerapi.ShareInfo, er
 	if local {
 		return n.localShares(), nil
 	}
-	cl, err := n.Client(id)
+	cl, err := n.Route(id)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +90,7 @@ func (n *Node) FS(ctx context.Context, peer, share string) (vfs.FS, error) {
 	if local {
 		return n.SourceFS(id, share)
 	}
-	cl, err := n.Client(id)
+	cl, err := n.Route(id)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +114,7 @@ func (n *Node) SourceFS(peerID, share string) (vfs.FS, error) {
 		}
 		return l, nil
 	}
-	cl, err := n.Client(peerID)
+	cl, err := n.Route(peerID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +136,7 @@ func (n *Node) SourceReadOnly(ctx context.Context, peerID, share string) (bool, 
 	if peerID == n.id.ID {
 		infos = n.localShares()
 	} else {
-		cl, err := n.Client(peerID)
+		cl, err := n.Route(peerID)
 		if err != nil {
 			return false, err
 		}

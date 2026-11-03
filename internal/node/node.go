@@ -74,6 +74,7 @@ type Node struct {
 	fsCache map[string]*openShare
 
 	jobs atomic.Pointer[transfer.Manager]
+	port atomic.Int32 // the bound peer port, when it differs from the config
 }
 
 type clientEntry struct {
@@ -194,7 +195,43 @@ func (n *Node) selfAddrs(c config.Config) []string {
 	if err != nil {
 		return nil
 	}
-	return normAddrs(mesh.DetectAddrs(ifs, listenPort(c.ListenAddr)))
+	port := listenPort(c.ListenAddr)
+	if p := int(n.port.Load()); p != 0 {
+		port = p
+	}
+	return normAddrs(mesh.DetectAddrs(ifs, port))
+}
+
+// SetPeerPort tells the node the port its peer listener actually bound, for
+// a configured port of 0, and refreshes the advertised addresses. An explicit
+// advertise_addrs list still wins.
+func (n *Node) SetPeerPort(port int) error {
+	n.port.Store(int32(port))
+	_, err := n.refreshSelf()
+	return err
+}
+
+// Name is this host's own name.
+func (n *Node) Name() string { return n.selfMember().Name }
+
+// Close closes the cached share filesystems and idle peer connections. Call
+// it after Run has returned and nothing else uses the node.
+func (n *Node) Close() {
+	n.fsMu.Lock()
+	for name, e := range n.fsCache {
+		e.fs.Close()
+		delete(n.fsCache, name)
+	}
+	n.fsMu.Unlock()
+	n.mu.Lock()
+	var cs []*peerapi.Client
+	for _, ce := range n.clients {
+		cs = append(cs, ce.c)
+	}
+	n.mu.Unlock()
+	for _, c := range cs {
+		c.SetAddrs(nil)
+	}
 }
 
 // refreshSelf makes this host's member record match its name and addresses,

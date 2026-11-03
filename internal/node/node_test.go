@@ -705,6 +705,65 @@ func TestProtocolMismatchMarked(t *testing.T) {
 	}
 }
 
+func TestIncompatiblePeerRefusedByRouting(t *testing.T) {
+	f := boot(t, t.TempDir(), "future", bootOpts{wrap: func(b peerapi.Backend) peerapi.Backend { return protoV2{b} }})
+	a := startNode(t, "alpha")
+	pair(t, f, a)
+	f.share("docs", nil)
+	eventually(t, "marked incompatible", func() bool { p, ok := peer(a.n, f.id.ID); return ok && p.Incompatible })
+
+	_, err := a.n.Shares(bg, "future")
+	wantCode(t, err, vfs.CodePeerIncompatible)
+	_, err = a.n.FS(bg, "future", "docs")
+	wantCode(t, err, vfs.CodePeerIncompatible)
+	_, err = a.n.SourceFS(f.id.ID, "docs")
+	wantCode(t, err, vfs.CodePeerIncompatible)
+	_, err = a.n.SourceReadOnly(bg, f.id.ID, "docs")
+	wantCode(t, err, vfs.CodePeerIncompatible)
+	_, err = a.n.Route(f.id.ID)
+	wantCode(t, err, vfs.CodePeerIncompatible)
+	// Health probing must still reach it, so that it can recover.
+	if _, err := a.n.Client(f.id.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetPeerPortChangesAdvertisedAddrs(t *testing.T) {
+	dir := t.TempDir()
+	id, err := identity.LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Update(func(c *config.Config) error { c.Name, c.ListenAddr = "alpha", "127.0.0.1:0"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	n, err := New(cfg, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.ifaces = func() ([]mesh.Iface, error) {
+		return []mesh.Iface{{Name: "eth0", IPs: []netip.Addr{netip.MustParseAddr("192.0.2.7")}}}, nil
+	}
+	if err := n.SetPeerPort(4242); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.selfMember().Addrs; !slices.Equal(got, []string{"192.0.2.7:4242"}) {
+		t.Fatalf("addrs %v", got)
+	}
+	// An explicit advertise list still wins.
+	cfg.Update(func(c *config.Config) error { c.AdvertiseAddrs = []string{"nas.example:7443"}; return nil })
+	if err := n.SetPeerPort(4243); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.selfMember().Addrs; !slices.Equal(got, []string{"nas.example:7443"}) {
+		t.Fatalf("addrs %v", got)
+	}
+}
+
 // ---- peerapi.Backend ----
 
 func TestBackendJobs(t *testing.T) {
