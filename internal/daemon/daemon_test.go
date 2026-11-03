@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -129,14 +130,26 @@ func TestStartStop(t *testing.T) {
 	if fi, _ := os.Stat(filepath.Join(dir, "runtime.json")); fi.Mode().Perm() != 0o600 && !isWindows() {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	// DAV answers 503 for now.
+	// WebDAV needs the token as Basic password and lists this host.
 	resp, err := http.Get("http://" + d.DAVAddr() + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 503 {
-		t.Fatalf("DAV status %d", resp.StatusCode)
+	if resp.StatusCode != 401 {
+		t.Fatalf("DAV without credentials: %d", resp.StatusCode)
+	}
+	req, _ := http.NewRequest("PROPFIND", "http://"+d.DAVAddr()+"/", nil)
+	req.Header.Set("Depth", "1")
+	req.SetBasicAuth("sugar-it", tok)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 207 || !strings.Contains(string(body), ">/local/<") {
+		t.Fatalf("DAV root: %d %s", resp.StatusCode, body)
 	}
 
 	stop(t, d)

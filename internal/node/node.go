@@ -285,6 +285,16 @@ func (n *Node) Peers() []PeerStatus {
 	return out
 }
 
+// PeerNames lists "local" and the alias of every other active member,
+// offline ones included, sorted.
+func (n *Node) PeerNames() []string {
+	out := []string{mesh.ReservedName}
+	for _, p := range n.Peers() {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
 func (n *Node) peerStatus(id string) (PeerStatus, bool) {
 	for _, p := range n.Peers() {
 		if p.ID == id {

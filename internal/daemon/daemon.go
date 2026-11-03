@@ -17,6 +17,7 @@ import (
 
 	"sugarintegration/internal/config"
 	"sugarintegration/internal/control"
+	"sugarintegration/internal/davfs"
 	"sugarintegration/internal/identity"
 	"sugarintegration/internal/node"
 	"sugarintegration/internal/peerapi"
@@ -26,9 +27,8 @@ import (
 )
 
 const (
-	partMaxAge    = 7 * 24 * time.Hour
-	defaultGrace  = 10 * time.Second // how long Shutdown lets open requests finish
-	davNotReadyMS = "WebDAV is not available in this build yet"
+	partMaxAge   = 7 * 24 * time.Hour
+	defaultGrace = 10 * time.Second // how long Shutdown lets open requests finish
 )
 
 // Options configures Start. An empty address means the configured one.
@@ -258,11 +258,9 @@ func (d *Daemon) collectParts(specs []shares.Spec) {
 	}
 }
 
-// davHandler serves WebDAV; Task 10 replaces it.
+// davHandler serves the mesh as WebDAV with a two-second listing cache.
 func davHandler(n *node.Node, token string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, davNotReadyMS, http.StatusServiceUnavailable)
-	})
+	return davfs.Handler(n, token, 2*time.Second)
 }
 
 // PeerAddr is the address the Peer API is bound to.

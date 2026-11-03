@@ -1115,3 +1115,15 @@ func TestRepairOfActiveHostDoesNotOutrunLaggingRemoval(t *testing.T) {
 	syncWith(t, a, d)
 	mustStayRemoved(t, a, c)
 }
+
+func TestPeerNamesIncludesLocalAndPeers(t *testing.T) {
+	a, b := startNode(t, "alpha"), startNode(t, "bravo")
+	if got := a.n.PeerNames(); len(got) != 1 || got[0] != "local" {
+		t.Fatalf("alone: %v", got)
+	}
+	pair(t, a, b)
+	eventually(t, "peer listed", func() bool {
+		got := a.n.PeerNames()
+		return len(got) == 2 && got[0] == "local" && got[1] == "bravo"
+	})
+}
