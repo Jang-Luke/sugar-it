@@ -1038,3 +1038,21 @@ func TestHealthTimeoutMarksOffline(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
+
+// A re-pair of a host that is still active must not raise its epoch: the
+// remover (whose view lags) would be outrun by a plain rename.
+func TestRepairOfActiveHostDoesNotOutrunLaggingRemoval(t *testing.T) {
+	a, c, d := idleTrio(t)
+	pair(t, d, c) // d invites c while c is active everywhere
+	syncWith(t, c, d)
+	if err := a.n.RemovePeer("charlie"); err != nil { // a has not heard of the re-pairing
+		t.Fatal(err)
+	}
+	if err := c.n.RenameSelf("charlie2"); err != nil {
+		t.Fatal(err)
+	}
+	syncWith(t, d, c)
+	syncWith(t, d, a)
+	syncWith(t, a, d)
+	mustStayRemoved(t, a, c)
+}

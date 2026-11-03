@@ -14,9 +14,10 @@ type Member struct {
 	Addrs      []string
 	Generation uint64
 	Removed    bool
-	// Epoch counts removals and re-pairings. It outranks Generation, so an
-	// owner's later changes (which raise only Generation) can never pass a
-	// tombstone; only a new pairing can.
+	// Epoch counts removals and re-admissions after a removal. It outranks
+	// Generation, so an owner's later changes (which raise only Generation)
+	// can never pass a tombstone; only a new pairing after the removal can.
+	// Active records have even epochs and tombstones odd ones.
 	Epoch uint64
 }
 
@@ -102,7 +103,8 @@ func sameMember(a, b Member) bool {
 }
 
 // LocalNames maps member ID to the alias this host uses for it. Only active
-// members get an alias. Members are visited in ID order; a name already taken
+// members get an alias. This host (selfID) is visited first, the rest in ID
+// order; a name already taken
 // (or the reserved "local") gets the next free "-2", "-3", ... suffix.
 func LocalNames(members []Member, selfID string) map[string]string {
 	active := make([]Member, 0, len(members))
