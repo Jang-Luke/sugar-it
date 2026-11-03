@@ -3,7 +3,7 @@ name: release
 # Runs only when a version tag is pushed. The only credential is GITHUB_TOKEN.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]*"]
 
 permissions:
   contents: read

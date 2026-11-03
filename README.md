@@ -158,11 +158,16 @@ Verified on the Linux build host:
   run alone and in the second full run), cross-compilation for windows and darwin with
   `CGO_ENABLED=0`, and the two-host quickstart above.
 
+**Verified packaging**: `goreleaser release --snapshot --clean` builds the six
+archives and the deb and rpm packages, and `checksums.txt` matches them.
+
 **Not verified**:
 
-- The GoReleaser snapshot, the six archives, the deb and rpm packages, the
-  nfpm contents, and the docker `dpkg -i` install check have never been run.
-  `.goreleaser.yaml` has never been parsed by GoReleaser.
+- The docker `dpkg -i` install check has never been run. The amd64 deb was
+  unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer
+  scripts, and that binary prints its version. The rpm packages were built but
+  never unpacked or installed, and the macOS and Windows binaries were built
+  but never run.
 - Mounting on macOS and on Windows, and on Linux (the build host has no
   `gvfs-backends`).
 - The desktop app walk-through (no display on the build host). Its Go and
