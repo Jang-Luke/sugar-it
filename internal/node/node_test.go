@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -1126,4 +1127,80 @@ func TestPeerNamesIncludesLocalAndPeers(t *testing.T) {
 		got := a.n.PeerNames()
 		return len(got) == 2 && got[0] == "local" && got[1] == "bravo"
 	})
+}
+
+// ---- removal reaches what is already in flight ----
+
+func openBigDownload(t *testing.T, server, client *tnode) (io.ReadCloser, int64) {
+	t.Helper()
+	dir := server.share("big", nil)
+	const size = 512 << 20
+	f, err := os.Create(filepath.Join(dir, "big"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	fsys := mustFS(t, client.n, server.n.Name(), "big")
+	rc, _, err := fsys.Open(bg, "big", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rc.Close() })
+	if _, err := io.ReadFull(rc, make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	return rc, size
+}
+
+func wantCutOff(t *testing.T, rc io.Reader, size int64) {
+	t.Helper()
+	n, err := io.Copy(io.Discard, rc)
+	if err == nil {
+		t.Fatalf("the removed host read the file to EOF (%d more bytes)", n)
+	}
+	if n >= size/2 {
+		t.Errorf("the removed host read %d more bytes", n)
+	}
+}
+
+func TestRemovePeerStopsOpenDownload(t *testing.T) {
+	a, b := startNode(t, "alpha"), startNode(t, "bravo")
+	pair(t, a, b)
+	rc, size := openBigDownload(t, a, b)
+	if err := a.n.RemovePeer("bravo"); err != nil {
+		t.Fatal(err)
+	}
+	wantCutOff(t, rc, size)
+}
+
+func TestGossipedRemovalStopsOpenDownload(t *testing.T) {
+	a, b, c := trio(t)
+	rc, size := openBigDownload(t, a, b)
+	if err := c.n.RemovePeer("bravo"); err != nil {
+		t.Fatal(err)
+	}
+	wantCutOff(t, rc, size)
+}
+
+func TestRepairedHostCanDownloadAgain(t *testing.T) {
+	a, b := startNode(t, "alpha"), startNode(t, "bravo")
+	pair(t, a, b)
+	rc, size := openBigDownload(t, a, b)
+	if err := a.n.RemovePeer("bravo"); err != nil {
+		t.Fatal(err)
+	}
+	wantCutOff(t, rc, size)
+	pair(t, a, b)
+	fsys := mustFS(t, b.n, "alpha", "big")
+	rc2, _, err := fsys.Open(bg, "big", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc2.Close()
+	if _, err := io.ReadFull(rc2, make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
 }

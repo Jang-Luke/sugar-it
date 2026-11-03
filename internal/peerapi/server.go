@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sugarintegration/internal/identity"
@@ -84,12 +85,73 @@ func (s *server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		caller := identity.IDOf(r.TLS.PeerCertificates[0])
-		if r.URL.EscapedPath() != "/v1/pair" && !s.b.IsMember(caller) {
-			writeErr(w, vfs.E(vfs.CodePeerUnauthorized, "not a member"))
-			return
+		ctx := context.WithValue(r.Context(), callerKey{}, caller)
+		if r.URL.EscapedPath() != "/v1/pair" {
+			if !s.b.IsMember(caller) {
+				writeErr(w, vfs.E(vfs.CodePeerUnauthorized, "not a member"))
+				return
+			}
+			// Asked only for members, so a stranger cannot grow the backend's
+			// state. Done already if the member was removed just now.
+			member := s.b.CallerContext(caller)
+			if member.Err() != nil {
+				writeErr(w, vfs.E(vfs.CodePeerUnauthorized, "not a member"))
+				return
+			}
+			var cancel context.CancelCauseFunc
+			ctx, cancel = context.WithCancelCause(ctx)
+			defer cancel(nil)
+			defer context.AfterFunc(member, func() { cancel(errRevoked) })()
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// errRevoked is the cause of a request's context when its caller was removed.
+var errRevoked = errors.New("the caller was removed")
+
+// revokedOr is err, or peer_unauthorized if err is due to the caller's removal.
+func revokedOr(r *http.Request, err error) error {
+	if errors.Is(context.Cause(r.Context()), errRevoked) {
+		return vfs.E(vfs.CodePeerUnauthorized, "not a member")
+	}
+	return err
+}
+
+// onCancel runs f when the request's context ends, unless the returned stop
+// was called first. Reads and writes blocked on the network look at no
+// context; f gives them a deadline. The ResponseWriter is unusable once the
+// handler has returned, so stop waits out an f that already started.
+func onCancel(r *http.Request, f func()) (stop func()) {
+	var mu sync.Mutex
+	finished := false
+	unregister := context.AfterFunc(r.Context(), func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !finished {
+			f()
+		}
+	})
+	return func() {
+		unregister()
+		mu.Lock()
+		finished = true
+		mu.Unlock()
+	}
+}
+
+// ctxReader fails once ctx is done, between reads of a source that does not
+// look at ctx itself.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(b []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(b)
 }
 
 func caller(r *http.Request) string { return r.Context().Value(callerKey{}).(string) }
@@ -312,9 +374,11 @@ func (s *server) download(w http.ResponseWriter, r *http.Request) {
 	if n == 0 {
 		return
 	}
+	// A client that stopped reading must not keep a removed member's stream.
+	defer onCancel(r, func() { http.NewResponseController(w).SetWriteDeadline(time.Now()) })()
 	// The promised length is a promise: if the file shrank or the copy fails,
 	// abort the stream so the client sees an error rather than a clean EOF.
-	if copied, err := io.Copy(w, io.LimitReader(rc, n)); err != nil || copied != n {
+	if copied, err := io.Copy(w, io.LimitReader(ctxReader{r.Context(), rc}, n)); err != nil || copied != n {
 		panic(http.ErrAbortHandler)
 	}
 }
@@ -341,9 +405,12 @@ func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A stalled uploader must not keep a removed member's request open.
+	stop := onCancel(r, func() { http.NewResponseController(w).SetReadDeadline(time.Now()) })
 	e, err := f.Put(r.Context(), p, r.Body, o) // the body is the file: not size-limited
+	stop()
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, revokedOr(r, err))
 		return
 	}
 	writeJSON(w, 200, e)
@@ -366,7 +433,7 @@ func (s *server) hash(w http.ResponseWriter, r *http.Request) {
 	http.NewResponseController(w).Flush()
 	sum, err := f.Hash(r.Context(), p)
 	if err != nil {
-		ve := wireErr(err)
+		ve := wireErr(revokedOr(r, err))
 		json.NewEncoder(w).Encode(hashBody{Code: ve.Code, Message: ve.Message})
 		return
 	}

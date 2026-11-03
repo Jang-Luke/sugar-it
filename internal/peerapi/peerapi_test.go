@@ -55,6 +55,12 @@ type fakeBackend struct {
 	jobs       []transfer.Job
 	canceled   []string
 	retried    []string
+	callers    map[string]*fakeCaller
+}
+
+type fakeCaller struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func newBackend(members ...string) *fakeBackend {
@@ -75,6 +81,33 @@ func (b *fakeBackend) setMember(id string, ok bool) {
 	b.mu.Lock()
 	b.members[id] = ok
 	b.mu.Unlock()
+}
+
+// revoke is what the daemon does on a removal: membership first, then the
+// caller's context.
+func (b *fakeBackend) revoke(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.members[id] = false
+	if c := b.callers[id]; c != nil {
+		c.cancel()
+		delete(b.callers, id)
+	}
+}
+
+func (b *fakeBackend) CallerContext(id string) context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.callers == nil {
+		b.callers = map[string]*fakeCaller{}
+	}
+	c := b.callers[id]
+	if c == nil {
+		c = &fakeCaller{}
+		c.ctx, c.cancel = context.WithCancel(context.Background())
+		b.callers[id] = c
+	}
+	return c.ctx
 }
 
 func (b *fakeBackend) IsMember(id string) bool {

@@ -42,6 +42,9 @@ type PairResponse struct {
 // ID of the TLS client certificate, never a value the caller claims.
 type Backend interface {
 	IsMember(id string) bool
+	// CallerContext is done when the member id is removed, ending everything
+	// it has in flight, and from the start if id is no longer a member.
+	CallerContext(id string) context.Context
 	Info() Info
 	Shares() []ShareInfo
 	ShareFS(name string) (vfs.FS, error)

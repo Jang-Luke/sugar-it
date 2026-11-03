@@ -94,7 +94,9 @@ func (n *Node) mergeIn(remote []mesh.Member, adopt *mesh.Member) (bool, error) {
 	return changed, err
 }
 
-// forgetInactive drops clients and status of members that are gone.
+// forgetInactive drops clients and status of members that are gone, and ends
+// what they have in flight here. The config already says they are gone, so
+// nothing new of theirs can start.
 func (n *Node) forgetInactive() {
 	active := map[string]bool{}
 	for _, m := range n.cfg.Get().Members {
@@ -113,6 +115,12 @@ func (n *Node) forgetInactive() {
 	for id := range n.status {
 		if !active[id] {
 			delete(n.status, id)
+		}
+	}
+	for id, c := range n.callers {
+		if !active[id] {
+			c.cancel()
+			delete(n.callers, id)
 		}
 	}
 	n.mu.Unlock()

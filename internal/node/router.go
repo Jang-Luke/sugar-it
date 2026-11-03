@@ -165,6 +165,23 @@ func (b backend) IsMember(id string) bool {
 	return err == nil
 }
 
+func (b backend) CallerContext(id string) context.Context {
+	n := b.n
+	n.mu.Lock()
+	c, ok := n.callers[id]
+	if !ok {
+		c.ctx, c.cancel = context.WithCancel(context.Background())
+		n.callers[id] = c
+	}
+	n.mu.Unlock()
+	// A removal writes the config before forgetInactive looks at callers, so
+	// either that sees this entry or this sees the removal.
+	if _, err := n.activePeer(id); err != nil {
+		n.forgetInactive()
+	}
+	return c.ctx
+}
+
 func (b backend) Info() peerapi.Info {
 	return peerapi.Info{ID: b.n.id.ID, Name: b.n.cfg.Get().Name, Protocol: peerapi.ProtocolMajor}
 }

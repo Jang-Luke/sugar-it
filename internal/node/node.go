@@ -68,6 +68,7 @@ type Node struct {
 	seen    struct{ epoch, gen uint64 } // highest active record any peer holds of this host (R7)
 	status  map[string]peerState
 	clients map[string]*clientEntry
+	callers map[string]callerEntry // what each member has in flight on this host
 	running bool
 
 	fsMu    sync.Mutex
@@ -80,6 +81,11 @@ type Node struct {
 type clientEntry struct {
 	c     *peerapi.Client
 	addrs []string
+}
+
+type callerEntry struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 var errNoChange = errors.New("no change")
@@ -105,6 +111,7 @@ func New(cfg *config.Store, id *identity.Identity) (*Node, error) {
 		gossipKick: make(chan struct{}, 1), healthKick: make(chan struct{}, 1),
 		status:  map[string]peerState{},
 		clients: map[string]*clientEntry{},
+		callers: map[string]callerEntry{},
 		fsCache: map[string]*openShare{},
 	}
 	n.tokens = mesh.NewTokens(func() time.Time { return n.now() })
@@ -227,6 +234,10 @@ func (n *Node) Close() {
 	var cs []*peerapi.Client
 	for _, ce := range n.clients {
 		cs = append(cs, ce.c)
+	}
+	for id, c := range n.callers {
+		c.cancel()
+		delete(n.callers, id)
 	}
 	n.mu.Unlock()
 	for _, c := range cs {
