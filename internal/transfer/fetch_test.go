@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -450,4 +453,23 @@ func TestFetchReadOnlyDest(t *testing.T) {
 	defer ro.Close()
 	_, err := Fetch(context.Background(), e.src, "a", ro, "a", "k1", ConflictFail, "linux", nil)
 	wantCode(t, err, vfs.CodeReadOnly)
+}
+
+// Messages reach other hosts, through job lists and peer API errors.
+func TestErrorsDoNotCarryLocalPaths(t *testing.T) {
+	pe := &os.PathError{Op: "mkdir", Path: "/secret/dir/jobs", Err: syscall.EACCES}
+	for name, err := range map[string]error{
+		"writeErr": writeErr(pe),
+		"ctxOr":    ctxOr(context.Background(), fmt.Errorf("copying: %w", pe)),
+	} {
+		if strings.Contains(err.Error(), "/secret") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("%s lost the reason: %v", name, err)
+		}
+	}
+	if m := messageOf(pe); strings.Contains(m, "/secret") {
+		t.Errorf("messageOf: %s", m)
+	}
 }

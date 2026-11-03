@@ -154,7 +154,7 @@ func (f *RemoteFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOpti
 				if errors.As(*serr, &ve) {
 					return vfs.Entry{}, ve
 				}
-				return vfs.Entry{}, vfs.E(vfs.CodeInternal, "source read: %v", *serr)
+				return vfs.Entry{}, vfs.E(vfs.CodeInternal, "source read: %s", vfs.PathlessDetail(*serr))
 			}
 		}
 		return vfs.Entry{}, err

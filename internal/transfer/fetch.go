@@ -322,7 +322,7 @@ func ctxOr(ctx context.Context, err error) error {
 	if errors.As(err, &ve) {
 		return ve
 	}
-	return vfs.E(vfs.CodeInternal, "source read: %v", err)
+	return vfs.E(vfs.CodeInternal, "source read: %s", vfs.PathlessDetail(err))
 }
 
 // writeErr maps a local write error to a spec code.
@@ -334,5 +334,5 @@ func writeErr(err error) error {
 	case shares.IsDiskFull(err):
 		return vfs.E(vfs.CodeDiskFull, "no space left on device")
 	}
-	return vfs.E(vfs.CodeInternal, "write: %v", err)
+	return vfs.E(vfs.CodeInternal, "write: %s", vfs.PathlessDetail(err))
 }

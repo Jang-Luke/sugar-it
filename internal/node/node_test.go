@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1265,5 +1267,44 @@ func TestGossipedRemovalStopsJobs(t *testing.T) {
 			t.Fatalf("job still %s", got.State)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The probe of the review: a host whose jobs directory cannot be written told
+// the peer that asked exactly where that directory is.
+func TestLocalPathsDoNotReachPeers(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores permissions")
+	}
+	a, b := startNode(t, "alpha"), startNode(t, "bravo")
+	pair(t, a, b)
+	a.share("docs", map[string]string{"f": "x"})
+	a.share("inbox", nil)
+	jobs := t.TempDir()
+	m, err := transfer.NewManager(transfer.Options{Dir: jobs, SelfID: a.id.ID, Source: a.n.SourceFS, SourceReadOnly: a.n.SourceReadOnly, Dest: a.n.DestFS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.n.AttachJobs(m)
+	dir := filepath.Join(jobs, "jobs")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	cl, err := b.n.Client(a.id.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cl.SubmitJob(bg, transfer.Spec{Op: "copy",
+		Src: transfer.Endpoint{Peer: a.id.ID, Share: "docs", Path: "f"},
+		Dst: transfer.Endpoint{Peer: a.id.ID, Share: "inbox"}})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), jobs) {
+		t.Errorf("the peer learned a local path: %v", err)
+	}
+	if got := internal(fmt.Errorf("saving: %w", &os.PathError{Op: "open", Path: "/secret/config.json", Err: os.ErrPermission})); strings.Contains(got.Error(), "/secret") {
+		t.Errorf("internal: %v", got)
 	}
 }

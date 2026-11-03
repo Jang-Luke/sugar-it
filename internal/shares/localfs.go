@@ -113,7 +113,7 @@ func mapErr(err error) error {
 	case errors.As(err, &le):
 		return vfs.E(vfs.CodeInternal, "%s: %v", le.Op, le.Err)
 	}
-	return vfs.E(vfs.CodeInternal, "%v", err)
+	return vfs.E(vfs.CodeInternal, "%s", vfs.PathlessDetail(err))
 }
 
 // noLinks rejects a clean path whose intermediate components are symlinks,
@@ -349,7 +349,7 @@ func srcErr(err error) error {
 	if errors.As(err, &ve) {
 		return ve
 	}
-	return vfs.E(vfs.CodeInternal, "source read: %v", err)
+	return vfs.E(vfs.CodeInternal, "source read: %s", vfs.PathlessDetail(err))
 }
 
 func (l *LocalFS) Hash(ctx context.Context, p string) (string, error) {

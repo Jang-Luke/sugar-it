@@ -662,3 +662,22 @@ func TestDirSyncOtherErrorsStillFail(t *testing.T) {
 		}
 	}
 }
+
+type pathErrReader struct{}
+
+func (pathErrReader) Read([]byte) (int, error) {
+	return 0, &os.PathError{Op: "read", Path: "/secret/share/file", Err: syscall.EIO}
+}
+
+// os.Root's files report absolute paths, and these messages reach other hosts.
+func TestSourceReadErrorDoesNotCarryLocalPath(t *testing.T) {
+	l, err := Open(Spec{Name: "s", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	_, err = l.Put(context.Background(), "f", pathErrReader{}, vfs.PutOptions{})
+	if err == nil || strings.Contains(err.Error(), "/secret") {
+		t.Fatalf("Put = %v", err)
+	}
+}

@@ -3,6 +3,8 @@ package vfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"testing"
 	"time"
 )
@@ -51,5 +53,20 @@ func TestETag(t *testing.T) {
 	}
 	if ETag(1, m) == ETag(1, m.Add(time.Nanosecond)) {
 		t.Error("mtime ignored")
+	}
+}
+
+func TestPathlessDetail(t *testing.T) {
+	pe := &os.PathError{Op: "open", Path: "/secret/a", Err: fs.ErrPermission}
+	le := &os.LinkError{Op: "rename", Old: "/secret/a", New: "/secret/b", Err: fs.ErrExist}
+	for err, want := range map[error]string{
+		pe:                            "open: permission denied",
+		fmt.Errorf("saving: %w", pe):  "open: permission denied",
+		le:                            "rename: file already exists",
+		errors.New("no path in this"): "no path in this",
+	} {
+		if got := PathlessDetail(err); got != want {
+			t.Errorf("%v: got %q, want %q", err, got, want)
+		}
 	}
 }

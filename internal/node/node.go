@@ -95,7 +95,7 @@ func internal(err error) error {
 	if errors.As(err, &ve) {
 		return err
 	}
-	return vfs.E(vfs.CodeInternal, "%v", err)
+	return vfs.E(vfs.CodeInternal, "%s", vfs.PathlessDetail(err))
 }
 
 // New returns a node over cfg. It records this host in the member list.

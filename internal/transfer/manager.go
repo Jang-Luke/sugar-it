@@ -943,7 +943,7 @@ func messageOf(err error) string {
 	if errors.As(err, &ve) {
 		return ve.Message
 	}
-	return err.Error()
+	return vfs.PathlessDetail(err)
 }
 
 // foldCase maps paths that differ only by case to one string. Lowering alone
