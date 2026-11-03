@@ -369,8 +369,12 @@ func (m *Manager) save(js *jobState) error {
 // names with one key are one file. On darwin, APFS and HFS+ ignore case and
 // Unicode normalization; on windows, NTFS ignores case only. Elsewhere bytes
 // decide. The key is for comparison only: names are written as they came.
-func (m *Manager) destKey(p string) string {
-	switch m.o.GOOS {
+func (m *Manager) destKey(p string) string { return NameKey(m.o.GOOS, p) }
+
+// NameKey is the comparison key of a path on a filesystem of the given
+// GOOS (see destKey).
+func NameKey(goos, p string) string {
+	switch goos {
 	case "darwin":
 		// Normalize first so both spellings fold alike (U+0130 and U+1F80 do
 		// not otherwise), and again because folding can denormalize.

@@ -21,13 +21,16 @@ import (
 	"golang.org/x/net/webdav"
 
 	"sugarintegration/internal/peerapi"
+	"sugarintegration/internal/transfer"
 	"sugarintegration/internal/vfs"
 )
 
 // User is the Basic auth user name; the password is the control token.
 const User = "sugar-it"
 
-const preflightTimeout = 5 * time.Second
+// metadataTimeout bounds every call that is not a body stream, so a peer that
+// stops answering fails a request instead of hanging it.
+var metadataTimeout = 5 * time.Second
 
 // Router is the part of the node WebDAV needs.
 type Router interface {
@@ -72,6 +75,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !h.preflight(w, r) {
 		return
 	}
+	rs := &reqState{}
+	w = &statusWriter{ResponseWriter: w, rs: rs}
+	r = r.WithContext(context.WithValue(r.Context(), reqKey{}, rs))
 	if r.Method == http.MethodPut {
 		st := &bodyState{want: r.ContentLength}
 		r.Body = &trackBody{ReadCloser: r.Body, st: st}
@@ -112,7 +118,7 @@ func (h *handler) preflight(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == http.MethodOptions {
 		return true
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), preflightTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), metadataTimeout)
 	defer cancel()
 	src := parse(r.URL.Path)
 	fail := func(status int, msg string) bool {
@@ -126,12 +132,12 @@ func (h *handler) preflight(w http.ResponseWriter, r *http.Request) bool {
 		switch {
 		case l.depth == 1:
 			if _, err := h.fs.shares(ctx, l.peer); err != nil {
-				return fail(statusOfErr(err), errText(err))
+				return fail(preflightStatus(err), errText(err))
 			}
 		case l.depth >= 2:
 			_, ro, err := h.fs.target(ctx, l)
 			if err != nil {
-				return fail(statusOfErr(err), errText(err))
+				return fail(preflightStatus(err), errText(err))
 			}
 			if write && ro {
 				return fail(http.StatusForbidden, "the share is read-only")
@@ -159,24 +165,104 @@ func (h *handler) preflight(w http.ResponseWriter, r *http.Request) bool {
 		if move && src.depth >= 2 && dst.depth >= 2 && (src.peer != dst.peer || src.share != dst.share) {
 			return fail(http.StatusBadGateway, vfs.CodeCrossHostRename+": moves across hosts or shares are done in the app")
 		}
+		if src.depth >= 3 && dst.depth >= 3 && src.peer == dst.peer && src.share == dst.share && related(src.rest, dst.rest) {
+			return fail(http.StatusForbidden, "the destination is the source, contains it or lies inside it")
+		}
 		return check(dst, true)
 	}
-	return check(src, false)
+	if !check(src, false) {
+		return false
+	}
+	if r.Method == "PROPFIND" && src.depth >= 2 {
+		// x/net sends 207 before it lists; fetch the listing (cached) first
+		// so an unreachable peer fails the request instead.
+		i, err := h.fs.stat(ctx, src)
+		if err == nil && i.dir && r.Header.Get("Depth") != "0" {
+			_, err = h.fs.list(ctx, src)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fail(preflightStatus(err), errText(err))
+		}
+	}
+	return true
 }
 
+// statusOfErr is the HTTP status an error deserves when x/net would not pick
+// it, or 0 for ordinary errors (not found and the like).
 func statusOfErr(err error) int {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusGatewayTimeout
 	}
 	switch vfs.CodeOf(err) {
-	case vfs.CodePeerOffline, vfs.CodePeerIncompatible:
+	case vfs.CodePeerOffline, vfs.CodePeerIncompatible, vfs.CodeCrossHostRename:
 		return http.StatusBadGateway
-	case vfs.CodePeerNotFound, vfs.CodeShareNotFound, vfs.CodeNotFound:
-		return http.StatusNotFound
 	case vfs.CodePeerUnauthorized, vfs.CodeReadOnly:
 		return http.StatusForbidden
+	case vfs.CodeInvalidName, vfs.CodeInvalidPath:
+		return http.StatusBadRequest
+	case vfs.CodeConflict:
+		return http.StatusConflict
+	case vfs.CodeChanged:
+		return http.StatusPreconditionFailed
+	case vfs.CodeHashMismatch:
+		return http.StatusUnprocessableEntity
+	case vfs.CodeDiskFull:
+		return http.StatusInsufficientStorage
+	}
+	return 0
+}
+
+// preflightStatus is statusOfErr with not-found codes and a 500 fallback.
+func preflightStatus(err error) int {
+	if st := statusOfErr(err); st != 0 {
+		return st
+	}
+	switch vfs.CodeOf(err) {
+	case vfs.CodePeerNotFound, vfs.CodeShareNotFound, vfs.CodeNotFound:
+		return http.StatusNotFound
 	}
 	return http.StatusInternalServerError
+}
+
+// reqKey carries a reqState; the file system records there the status a
+// failed operation deserves, and the response writer applies it when x/net
+// answers with an error status of its own choosing.
+type reqKey struct{}
+
+type reqState struct{ status int }
+
+type statusWriter struct {
+	http.ResponseWriter
+	rs *reqState
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if code >= 400 && w.rs.status != 0 {
+		code = w.rs.status
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// metaCtx bounds a metadata call; the returned func maps an error caused by
+// the deadline to context.DeadlineExceeded, whatever the callee reported.
+func metaCtx(ctx context.Context) (context.Context, context.CancelFunc, func(error) error) {
+	mctx, cancel := context.WithTimeout(ctx, metadataTimeout)
+	return mctx, cancel, func(err error) error {
+		if err != nil && mctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+			return context.DeadlineExceeded
+		}
+		return err
+	}
+}
+
+// inside reports whether the cleaned paths a and b are the same name or one
+// contains the other, comparing as the strictest destination OS would
+// (case-folded, NFC), so a MOVE or COPY cannot slip past on those systems.
+func related(a, b string) bool {
+	ka, kb := transfer.NameKey("darwin", a), transfer.NameKey("darwin", b)
+	return ka == kb || strings.HasPrefix(ka, kb+"/") || strings.HasPrefix(kb, ka+"/")
 }
 
 func errText(err error) string {
@@ -243,9 +329,17 @@ type fileSystem struct {
 
 var _ webdav.FileSystem = (*fileSystem)(nil)
 
-func pathErr(op, name string, err error) error {
+// pathErr maps a vfs error to what x/net understands. x/net turns most
+// errors into 404 or 405, so errors that deserve another status are also
+// recorded in the request's reqState and applied to the response.
+func (f *fileSystem) pathErr(ctx context.Context, op, name string, err error) error {
 	if err == nil {
 		return nil
+	}
+	if st := statusOfErr(err); st != 0 {
+		if rs, _ := ctx.Value(reqKey{}).(*reqState); rs != nil && rs.status == 0 {
+			rs.status = st
+		}
 	}
 	var base error
 	switch vfs.CodeOf(err) {
@@ -267,8 +361,10 @@ func (f *fileSystem) shares(ctx context.Context, peer string) ([]peerapi.ShareIn
 		return v.([]peerapi.ShareInfo), nil
 	}
 	gen := f.c.generation()
-	s, err := f.r.Shares(ctx, peer)
-	if err != nil {
+	mctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
+	s, err := f.r.Shares(mctx, peer)
+	if err = mapErr(err); err != nil {
 		return nil, err
 	}
 	f.c.put(k, s, gen)
@@ -290,8 +386,10 @@ func (f *fileSystem) target(ctx context.Context, l loc) (vfs.FS, bool, error) {
 		return v.(vfs.FS), infos[i].ReadOnly, nil
 	}
 	gen := f.c.generation()
-	fsys, err := f.r.FS(ctx, l.peer, l.share)
-	if err != nil {
+	mctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
+	fsys, err := f.r.FS(mctx, l.peer, l.share)
+	if err = mapErr(err); err != nil {
 		return nil, false, err
 	}
 	f.c.put(k, fsys, gen)
@@ -310,8 +408,10 @@ func (f *fileSystem) list(ctx context.Context, l loc) ([]vfs.Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	all, err := fsys.List(ctx, l.rest)
-	if err != nil {
+	mctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
+	all, err := fsys.List(mctx, l.rest)
+	if err = mapErr(err); err != nil {
 		return nil, err
 	}
 	out := all[:0:0]
@@ -368,7 +468,7 @@ func (f *fileSystem) stat(ctx context.Context, l loc) (info, error) {
 func (f *fileSystem) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	i, err := f.stat(ctx, parse(name))
 	if err != nil {
-		return nil, pathErr("stat", name, err)
+		return nil, f.pathErr(ctx, "stat", name, err)
 	}
 	return i, nil
 }
@@ -410,17 +510,17 @@ func (f *fileSystem) OpenFile(ctx context.Context, name string, flag int, perm o
 	}
 	self, err := f.stat(ctx, l)
 	if err != nil {
-		return nil, pathErr("open", name, err)
+		return nil, f.pathErr(ctx, "open", name, err)
 	}
 	if self.dir {
 		return &dirFile{self: self, load: func() ([]os.FileInfo, error) {
 			c, err := f.children(ctx, l)
-			return c, pathErr("readdir", name, err)
+			return c, f.pathErr(ctx, "readdir", name, err)
 		}}, nil
 	}
 	fsys, _, err := f.target(ctx, l)
 	if err != nil {
-		return nil, pathErr("open", name, err)
+		return nil, f.pathErr(ctx, "open", name, err)
 	}
 	return &readFile{ctx: ctx, fs: fsys, path: l.rest, self: self}, nil
 }
@@ -431,7 +531,7 @@ func (f *fileSystem) openWrite(ctx context.Context, name string, l loc, flag int
 	}
 	fsys, ro, err := f.target(ctx, l)
 	if err != nil {
-		return nil, pathErr("open", name, err)
+		return nil, f.pathErr(ctx, "open", name, err)
 	}
 	if ro {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
@@ -439,7 +539,7 @@ func (f *fileSystem) openWrite(ctx context.Context, name string, l loc, flag int
 	if p := l.parent(); p.depth >= 3 {
 		pi, err := f.stat(ctx, p)
 		if err != nil {
-			return nil, pathErr("open", name, err)
+			return nil, f.pathErr(ctx, "open", name, err)
 		}
 		if !pi.dir {
 			return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
@@ -467,10 +567,12 @@ func (f *fileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) e
 	}
 	fsys, _, err := f.target(ctx, l)
 	if err != nil {
-		return pathErr("mkdir", name, err)
+		return f.pathErr(ctx, "mkdir", name, err)
 	}
 	defer f.changed(l)
-	return pathErr("mkdir", name, fsys.Mkdir(ctx, l.rest))
+	mctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
+	return f.pathErr(ctx, "mkdir", name, mapErr(fsys.Mkdir(mctx, l.rest)))
 }
 
 func (f *fileSystem) RemoveAll(ctx context.Context, name string) error {
@@ -480,11 +582,13 @@ func (f *fileSystem) RemoveAll(ctx context.Context, name string) error {
 	}
 	fsys, _, err := f.target(ctx, l)
 	if err != nil {
-		return pathErr("remove", name, err)
+		return f.pathErr(ctx, "remove", name, err)
 	}
 	defer f.changed(l)
-	if err := fsys.Remove(ctx, l.rest, true); err != nil && vfs.CodeOf(err) != vfs.CodeNotFound {
-		return pathErr("remove", name, err)
+	mctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
+	if err := mapErr(fsys.Remove(mctx, l.rest, true)); err != nil && vfs.CodeOf(err) != vfs.CodeNotFound {
+		return f.pathErr(ctx, "remove", name, err)
 	}
 	return nil
 }
@@ -498,13 +602,18 @@ func (f *fileSystem) Rename(ctx context.Context, oldName, newName string) error 
 		return &os.LinkError{Op: "rename", Old: oldName, New: newName,
 			Err: vfs.E(vfs.CodeCrossHostRename, "moves across hosts or shares are done in the app")}
 	}
+	if related(from.rest, to.rest) {
+		return &os.LinkError{Op: "rename", Old: oldName, New: newName, Err: os.ErrInvalid}
+	}
 	fsys, _, err := f.target(ctx, from)
 	if err != nil {
-		return pathErr("rename", oldName, err)
+		return f.pathErr(ctx, "rename", oldName, err)
 	}
+	ctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
 	defer f.changed(from)
 	defer f.changed(to)
-	return pathErr("rename", oldName, fsys.Rename(ctx, from.rest, to.rest))
+	return f.pathErr(ctx, "rename", oldName, mapErr(fsys.Rename(ctx, from.rest, to.rest)))
 }
 
 // changed drops what a write at l may have made stale: the parent's listing

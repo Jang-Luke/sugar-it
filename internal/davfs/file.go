@@ -278,5 +278,5 @@ func (w *writeFile) Close() error {
 		return err
 	}
 	_, err := w.target.Put(w.ctx, w.l.rest, w.spool, vfs.PutOptions{Overwrite: w.overwrite})
-	return pathErr("put", w.name, err)
+	return w.fsys.pathErr(w.ctx, "put", w.name, err)
 }

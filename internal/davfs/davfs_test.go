@@ -29,6 +29,8 @@ type countFS struct {
 	vfs.FS
 	stat, list, put atomic.Int64
 	beforeOpen      func(n int)
+	putErr          error
+	listHook        func(ctx context.Context) error
 	opens           atomic.Int64
 }
 
@@ -38,10 +40,19 @@ func (c *countFS) Stat(ctx context.Context, p string) (vfs.Entry, error) {
 }
 func (c *countFS) List(ctx context.Context, p string) ([]vfs.Entry, error) {
 	c.list.Add(1)
+	if c.listHook != nil {
+		if err := c.listHook(ctx); err != nil {
+			return nil, err
+		}
+	}
 	return c.FS.List(ctx, p)
 }
 func (c *countFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptions) (vfs.Entry, error) {
 	c.put.Add(1)
+	if c.putErr != nil {
+		io.Copy(io.Discard, r)
+		return vfs.Entry{}, c.putErr
+	}
 	return c.FS.Put(ctx, p, r, o)
 }
 func (c *countFS) Open(ctx context.Context, p string, off int64, etag string) (io.ReadCloser, vfs.Entry, error) {
@@ -121,6 +132,8 @@ func newShare(t *testing.T, name string, ro bool) *fakeShare {
 	return &fakeShare{fs: &countFS{FS: l}, ro: ro, dir: dir}
 }
 
+var client = &http.Client{Timeout: 10 * time.Second}
+
 type env struct {
 	r    *fakeRouter
 	ts   *httptest.Server
@@ -166,7 +179,7 @@ func (e *env) req(t *testing.T, method, path, body string, hdr map[string]string
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,5 +608,91 @@ func TestSymlinkHidden(t *testing.T) {
 		if st, b, _ := e.req(t, "GET", p, "", nil); st != 404 || strings.Contains(b, "secret") {
 			t.Errorf("%s: %d %q", p, st, b)
 		}
+	}
+}
+
+func TestMoveCopyOntoRelatedPathRefused(t *testing.T) {
+	e := setup(t)
+	os.MkdirAll(filepath.Join(e.docs.dir, "sub", "deep"), 0o755)
+	write(t, e.docs.dir, "sub/f.txt", "f")
+	write(t, e.docs.dir, "sub/deep/g.txt", "g")
+	cases := []struct{ m, src, dst string }{
+		{"MOVE", "sub/f.txt", "sub"},      // onto the parent
+		{"MOVE", "sub/deep/g.txt", "sub"}, // onto an ancestor
+		{"MOVE", "sub", "sub/deep"},       // into itself
+		{"MOVE", "sub", "sub/new"},        // into itself, new name
+		{"MOVE", "sub", "sub"},            // onto itself
+		{"MOVE", "sub", "SUB/new"},        // case-folded spelling
+		{"COPY", "sub", "sub/copy"},       // would recurse forever
+		{"COPY", "sub/f.txt", "sub"},      // onto the parent
+		{"COPY", "sub", "sub/deep"},
+		{"COPY", "sub", "Sub/copy"},
+	}
+	for _, c := range cases {
+		for _, ow := range []string{"T", "F"} {
+			st, _, _ := e.req(t, c.m, "/local/docs/"+c.src, "", map[string]string{
+				"Destination": e.ts.URL + "/local/docs/" + c.dst, "Overwrite": ow})
+			if st != 403 && st != 409 {
+				t.Errorf("%s %s -> %s (Overwrite %s): %d", c.m, c.src, c.dst, ow, st)
+			}
+			for _, f := range []string{"sub/f.txt", "sub/deep/g.txt"} {
+				if _, err := os.Stat(filepath.Join(e.docs.dir, f)); err != nil {
+					t.Fatalf("%s %s -> %s (Overwrite %s) destroyed %s", c.m, c.src, c.dst, ow, f)
+				}
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(e.docs.dir, "sub", "copy")); err == nil {
+		t.Error("copy created inside the source")
+	}
+}
+
+func TestMetadataCallsTimeOut(t *testing.T) {
+	old := metadataTimeout
+	metadataTimeout = 300 * time.Millisecond
+	defer func() { metadataTimeout = old }()
+	e := setup(t)
+	e.docs.fs.listHook = func(ctx context.Context) error {
+		<-ctx.Done() // a peer that stopped answering
+		return ctx.Err()
+	}
+	start := time.Now()
+	st, _, _ := e.req(t, "PROPFIND", "/local/docs", "", map[string]string{"Depth": "1"})
+	if st < 500 || st > 599 || time.Since(start) > 3*time.Second {
+		t.Fatalf("status %d after %v", st, time.Since(start))
+	}
+}
+
+func TestPutCloseErrorStatus(t *testing.T) {
+	for code, want := range map[string]int{
+		vfs.CodeInvalidName: 400, vfs.CodeConflict: 409, vfs.CodePeerOffline: 502, vfs.CodeDiskFull: 507,
+		vfs.CodeReadOnly: 403, vfs.CodeChanged: 412,
+	} {
+		e := setup(t)
+		e.docs.fs.putErr = vfs.E(code, "boom")
+		if st, _, _ := e.req(t, "PUT", "/local/docs/x.bin", "data", nil); st != want {
+			t.Errorf("%s: status %d, want %d", code, st, want)
+		}
+		if _, err := os.Stat(filepath.Join(e.docs.dir, "x.bin")); err == nil {
+			t.Errorf("%s: file created", code)
+		}
+	}
+}
+
+func TestMetadataTimeoutOutsidePreflight(t *testing.T) {
+	old := metadataTimeout
+	metadataTimeout = 300 * time.Millisecond
+	defer func() { metadataTimeout = old }()
+	e := setup(t)
+	os.MkdirAll(filepath.Join(e.docs.dir, "d"), 0o755)
+	write(t, e.docs.dir, "d/f.txt", "f")
+	e.docs.fs.listHook = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	start := time.Now()
+	e.req(t, "COPY", "/local/docs/d", "", map[string]string{"Destination": e.ts.URL + "/local/docs/d2"})
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("COPY hung for %v", time.Since(start))
 	}
 }
