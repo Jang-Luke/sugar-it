@@ -203,11 +203,11 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   `BasicAuthLevel` 2: it connected a chosen and an automatic drive, then listed,
   read, wrote and deleted, and disconnected. The `\\127.0.0.1@port\DavWWWRoot`
   form is what that run used.
-- The background start (`sugar-it daemon` without `--foreground`) on Windows and
-  macOS: the Windows flags (`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS |
-  CREATE_NO_WINDOW`), a start from the GUI-subsystem `sugar-it-desktop.exe`, and
-  whether `sugar-it.exe` still flashes a console at logon are not verified. It
-  was run on Linux only.
+- The background start (`sugar-it daemon` without `--foreground`) on macOS, and
+  from the GUI-subsystem `sugar-it-desktop.exe`, and whether a console flashes
+  at logon on Windows. On Windows 11 over SSH, `sugar-it.exe daemon` outlived the
+  session, a second start was refused, `stop` removed `runtime.json`, and
+  `service uninstall` removed the Run value and stopped the daemon.
 - `sugar-it service uninstall` on Windows: removing the v0.1.0 scheduled task
   (and the error when it needs an administrator) and stopping a running daemon
   were tested only with fake commands. On Linux and macOS uninstall stops the
@@ -242,6 +242,13 @@ recorded for the scheduled-task version; the service now uses a Run key and no
 unsigned, in `%TEMP%`, and run over SSH, so an installed copy may behave
 differently; this has not been tested. If it happens to you, Windows Security
 shows the detection.
+
+**Upgrading from v0.1.0**: `sugar-it daemon` now detaches, so a service
+installed by v0.1.0 stops working: run `sugar-it service install` again to
+rewrite it, which adds `--foreground` on Linux and macOS. On Windows, run
+`sugar-it service uninstall` to remove the old scheduled task; it may need an
+administrator prompt. A daemon already running from v0.1.0 has no `stop`: use
+Ctrl-C or restart it once.
 
 ## Development
 
