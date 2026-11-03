@@ -324,6 +324,13 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		control.RemoveRuntime(d.dir, d.rt)
 		d.lock.Close() // last: only now may another daemon take over
 	})
+	// stopped first: with a stream outlasting the grace period both are ready,
+	// and a daemon that has stopped must not be reported as still stopping.
+	select {
+	case <-d.stopped:
+		return nil
+	default:
+	}
 	select {
 	case <-d.stopped:
 		return nil

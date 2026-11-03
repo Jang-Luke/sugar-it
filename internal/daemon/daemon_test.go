@@ -667,3 +667,20 @@ func TestShutdownReturnsNilWhenFinished(t *testing.T) {
 		}
 	}
 }
+
+// When a stream outlasts the grace period the caller's deadline has passed by
+// the time the daemon has stopped. Shutdown did stop, so it must say so; the
+// CLI turned the random error into exit 1.
+func TestShutdownPastItsDeadlineStillReportsStopped(t *testing.T) {
+	_, o := setup(t, "a")
+	expired, cancel := context.WithDeadline(bg, time.Now().Add(-time.Second))
+	defer cancel()
+	for round := range 8 {
+		d := start(t, o)
+		for i := range 50 {
+			if err := d.Shutdown(expired); err != nil {
+				t.Fatalf("round %d, call %d: Shutdown = %v", round, i, err)
+			}
+		}
+	}
+}
