@@ -1,6 +1,7 @@
 package peerapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -42,7 +44,7 @@ func newServer(id *identity.Identity, b Backend, goos string) *http.Server {
 			ClientAuth:   tls.RequireAnyClientCert, // identity is checked per request
 			Certificates: []tls.Certificate{id.Cert},
 		},
-		ErrorLog:          log.New(io.Discard, "", 0), // handshake failures are routine noise
+		ErrorLog:          log.New(&filterWriter{w: os.Stderr}, "peerapi: ", log.LstdFlags),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		// No Read/WriteTimeout: file transfers are arbitrarily long.
@@ -82,7 +84,7 @@ func (s *server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		caller := identity.IDOf(r.TLS.PeerCertificates[0])
-		if r.URL.Path != "/v1/pair" && !s.b.IsMember(caller) {
+		if r.URL.EscapedPath() != "/v1/pair" && !s.b.IsMember(caller) {
 			writeErr(w, vfs.E(vfs.CodePeerUnauthorized, "not a member"))
 			return
 		}
@@ -117,6 +119,9 @@ func writeErr(w http.ResponseWriter, err error) {
 
 // decode reads a size-limited JSON body.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	// A stranger may reach /v1/pair, so a stalled body must not hold the
+	// handler open. Only JSON bodies get a deadline; uploads do not.
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(jsonReadTimeout))
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		var mb *http.MaxBytesError
@@ -459,4 +464,18 @@ func (s *server) cancelJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) retryJob(w http.ResponseWriter, r *http.Request) {
 	s.done(w, s.b.RetryJob(r.PathValue("id")))
+}
+
+// jsonReadTimeout bounds how long a JSON request body may take to arrive.
+var jsonReadTimeout = 10 * time.Second
+
+type filterWriter struct{ w io.Writer }
+
+// Write drops TLS handshake failures, which every port scan and pinned-ID
+// mismatch produces, and passes everything else (notably handler panics).
+func (f *filterWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return f.w.Write(p)
 }

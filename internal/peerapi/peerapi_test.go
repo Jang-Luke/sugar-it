@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -214,7 +215,16 @@ type env struct {
 	srv          *http.Server
 	addr         string
 	c            *Client
+	logs         syncBuf
 }
+
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 func start(t *testing.T, goos string) *env {
 	t.Helper()
@@ -225,6 +235,7 @@ func start(t *testing.T, goos string) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv.ErrorLog = log.New(&filterWriter{w: &e.logs}, "", 0) // same filter as production, captured
 	go srv.ServeTLS(ln, "", "")
 	t.Cleanup(func() { srv.Close() })
 	e.srv, e.addr = srv, ln.Addr().String()
@@ -1173,5 +1184,138 @@ func TestMembersAndJobsRoundTrip(t *testing.T) {
 	wantCode(t, e.c.RetryJob(bg, "nope"), vfs.CodeNotFound)
 	if err := e.c.CancelJob(bg, "a b/c"); err != nil { // ids are path-escaped
 		t.Fatalf("escaped id: %v", err)
+	}
+}
+
+// ---- review round 1 ----
+
+func TestNonMemberGets403OnEveryNonPairPath(t *testing.T) {
+	e := start(t, "linux")
+	e.b.setMember(e.cliID.ID, false)
+	paths := []string{
+		"/v1%2Fpair", "/v1/pai%72", "/v1/pair/", "/v1//pair", "/v1/pair/../shares", "/v1/pair/%2e%2e/shares",
+		"/v1%2Fshares", "/v1/shares", "/v1/info", "/nope", "/", "/v1/PAIR", "/v1/pair%2F",
+	}
+	for _, m := range []string{"GET", "POST", "PUT"} {
+		for _, p := range paths {
+			req, err := http.NewRequest(m, e.c.base+p, strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := e.c.hc.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", m, p, err)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var ve vfs.Error
+			json.Unmarshal(b, &ve)
+			if resp.StatusCode != 403 || ve.Code != vfs.CodePeerUnauthorized {
+				t.Errorf("%s %s: status %d body %s", m, p, resp.StatusCode, b)
+			}
+		}
+	}
+	if e.b.pairCaller != "" {
+		t.Fatal("a non-pair path reached Pair")
+	}
+}
+
+func TestFilterWriterKeepsRealErrors(t *testing.T) {
+	var out syncBuf
+	l := log.New(&filterWriter{w: &out}, "", 0)
+	l.Printf("http: TLS handshake error from 1.2.3.4:5: EOF")
+	l.Printf("http: panic serving 1.2.3.4:5: boom")
+	if got := out.String(); strings.Contains(got, "handshake") || !strings.Contains(got, "panic serving") {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+func TestHandlerPanicIsLogged(t *testing.T) {
+	e := start(t, "linux")
+	l, _ := localShare(t, false)
+	e.share("s", &hookFS{FS: l, hash: func(context.Context, string) (string, error) { panic("fs bug") }}, false)
+	e.c.FS("s").Hash(bg, "f")
+	_, err := e.c.FS("s").Stat(bg, "") // handshake-noise path stays quiet too
+	_ = err
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(e.logs.String(), "fs bug") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(e.logs.String(), "fs bug") {
+		t.Fatalf("panic not logged: %q", e.logs.String())
+	}
+}
+
+func TestJSONBodyReadDeadline(t *testing.T) {
+	old := jsonReadTimeout
+	jsonReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { jsonReadTimeout = old })
+	e := start(t, "linux")
+	e.b.setMember(e.cliID.ID, false) // a stranger, who may only pair
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	go pw.Write([]byte("{")) // then stalls forever
+	req, _ := http.NewRequest("POST", e.c.base+"/v1/pair", pr)
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, err := e.c.hc.Do(req)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- resp
+	}()
+	select {
+	case resp := <-done:
+		if resp != nil {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 400 || !strings.Contains(string(b), vfs.CodeInvalidRequest) {
+				t.Fatalf("status %d body %s", resp.StatusCode, b)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled JSON body held the handler open")
+	}
+}
+
+func TestUploadHasNoReadDeadline(t *testing.T) {
+	old := jsonReadTimeout
+	jsonReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { jsonReadTimeout = old })
+	e := start(t, "linux")
+	l, dir := localShare(t, false)
+	e.share("s", l, false)
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte("slow"))
+		time.Sleep(700 * time.Millisecond)
+		pw.Write([]byte("er"))
+		pw.Close()
+	}()
+	if _, err := e.c.FS("s").Put(bg, "f", pr, vfs.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "f")); string(b) != "slower" {
+		t.Fatalf("got %q", b)
+	}
+}
+
+type ctxFailReader struct{ ctx context.Context }
+
+func (r ctxFailReader) Read([]byte) (int, error) {
+	<-r.ctx.Done()
+	return 0, vfs.E(vfs.CodeChanged, "source gone")
+}
+
+func TestPutCancelRacesWithSourceError(t *testing.T) {
+	e := start(t, "linux")
+	l, _ := localShare(t, false)
+	e.share("s", l, false)
+	for i := 0; i < 30; i++ {
+		ctx, cancel := context.WithCancel(bg)
+		time.AfterFunc(5*time.Millisecond, cancel)
+		_, err := e.c.FS("s").Put(ctx, "f", ctxFailReader{ctx}, vfs.PutOptions{})
+		wantCode(t, err, vfs.CodeCanceled)
+		cancel()
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 
 	"sugarintegration/internal/vfs"
 )
@@ -117,13 +118,13 @@ func (f *RemoteFS) Hash(ctx context.Context, p string) (string, error) {
 // caller's source is reported as such rather than as a broken connection.
 type recordReader struct {
 	r   io.Reader
-	err error
+	err atomic.Pointer[error] // written by the transport's goroutine
 }
 
 func (r *recordReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
-	if err != nil && err != io.EOF && r.err == nil {
-		r.err = err
+	if err != nil && err != io.EOF {
+		r.err.CompareAndSwap(nil, &err)
 	}
 	return n, err
 }
@@ -147,12 +148,14 @@ func (f *RemoteFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOpti
 	}
 	resp, err := f.c.send(ctx, "PUT", f.path("file"), q, body, http.Header{"Content-Type": {"application/octet-stream"}})
 	if err != nil {
-		if rec != nil && rec.err != nil && ctx.Err() == nil {
-			var ve *vfs.Error
-			if errors.As(rec.err, &ve) {
-				return vfs.Entry{}, ve
+		if ctx.Err() == nil && rec != nil {
+			if serr := rec.err.Load(); serr != nil {
+				var ve *vfs.Error
+				if errors.As(*serr, &ve) {
+					return vfs.Entry{}, ve
+				}
+				return vfs.Entry{}, vfs.E(vfs.CodeInternal, "source read: %v", *serr)
 			}
-			return vfs.Entry{}, vfs.E(vfs.CodeInternal, "source read: %v", rec.err)
 		}
 		return vfs.Entry{}, err
 	}
