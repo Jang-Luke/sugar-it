@@ -2,12 +2,14 @@ package davfs
 
 import (
 	"io"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"sugarintegration/internal/peerapi"
 	"sugarintegration/internal/vfs"
 )
 
@@ -303,5 +305,69 @@ func TestOverwriteRespectsLocks(t *testing.T) {
 	}
 	if got := read(t, e.docs.dir, "locked.txt"); got != "0123456789" {
 		t.Fatalf("locked.txt = %q", got)
+	}
+}
+
+// WebDAV applies the same name rules as the Peer API (spec 7).
+func TestInvalidNamesRefused(t *testing.T) {
+	e := setup(t)
+	for _, c := range []struct {
+		method, path string
+		hdr          map[string]string
+	}{
+		{"PUT", "/local/docs/bad%FFname", nil},
+		{"PUT", "/local/docs/sub/bad%FFname", nil},
+		{"MKCOL", "/local/docs/bad%FFdir", nil},
+		{"PUT", "/local/docs/bad%FFdir/inner", nil},
+		{"COPY", "/local/docs/a.txt", map[string]string{"Destination": e.ts.URL + "/local/docs/bad%FFcopy"}},
+		{"MOVE", "/local/docs/a.txt", map[string]string{"Destination": e.ts.URL + "/local/docs/bad%FFmove"}},
+	} {
+		body := "x"
+		if c.method == "MKCOL" {
+			body = ""
+		}
+		st, _, _ := e.req(t, c.method, c.path, body, c.hdr)
+		if st != 400 {
+			t.Errorf("%s %s: status %d, want 400", c.method, c.path, st)
+		}
+	}
+	ents, err := os.ReadDir(e.docs.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, de := range ents {
+		if strings.HasPrefix(de.Name(), "bad") {
+			t.Errorf("created %q", de.Name())
+		}
+	}
+	if got := read(t, e.docs.dir, "a.txt"); got != "0123456789" {
+		t.Errorf("a.txt = %q", got)
+	}
+	// A name that is fine stays fine, Korean included.
+	if st, _, _ := e.req(t, "PUT", "/local/docs/%ED%95%9C%EA%B8%80.txt", "x", nil); st != 201 {
+		t.Errorf("valid name: status %d", st)
+	}
+}
+
+// The rules are this host's OS's; a peer's share is left to the peer, which may
+// allow names this host would not.
+func TestNameRulesFollowTheOS(t *testing.T) {
+	e := setup(t)
+	h := Handler(e.r, tok, 0).(*handler)
+	h.fs.goos = "windows"
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	wenv := &env{ts: ts}
+	if st, _, _ := wenv.req(t, "PUT", "/local/docs/a:b", "x", nil); st != 400 {
+		t.Errorf("a:b on windows: status %d, want 400", st)
+	}
+	if st, _, _ := wenv.req(t, "MKCOL", "/local/docs/NUL", "", nil); st != 400 {
+		t.Errorf("NUL on windows: status %d, want 400", st)
+	}
+	if st, _, _ := e.req(t, "PUT", "/local/docs/a:b", "x", nil); st != 201 {
+		t.Errorf("a:b on linux: status %d, want 201", st)
+	}
+	if err := h.fs.checkName(&peerapi.RemoteFS{}, "a:b"); err != nil {
+		t.Errorf("a peer's share: %v", err)
 	}
 }

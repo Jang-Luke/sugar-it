@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -48,7 +49,7 @@ type Router interface {
 // cacheTTL bounds how long listings and share lists are reused; zero
 // disables caching.
 func Handler(r Router, token string, cacheTTL time.Duration) http.Handler {
-	fsys := &fileSystem{r: r, c: newCache(cacheTTL), started: time.Now()}
+	fsys := &fileSystem{r: r, c: newCache(cacheTTL), started: time.Now(), goos: runtime.GOOS}
 	return &handler{
 		fs:      fsys,
 		dav:     &webdav.Handler{FileSystem: fsys, LockSystem: webdav.NewMemLS()},
@@ -381,6 +382,7 @@ type fileSystem struct {
 	r       Router
 	c       *cache
 	started time.Time
+	goos    string // whose file name rules apply to this host's shares
 }
 
 var _ webdav.FileSystem = (*fileSystem)(nil)
@@ -581,6 +583,21 @@ func (f *fileSystem) OpenFile(ctx context.Context, name string, flag int, perm o
 	return &readFile{ctx: ctx, fs: fsys, path: l.rest, self: self}, nil
 }
 
+// checkName applies the file name rules to a path being created. The Peer API
+// does that for a peer's share, by the peer's OS; this host's own shares are
+// reached without it.
+func (f *fileSystem) checkName(fsys vfs.FS, rest string) error {
+	if _, remote := fsys.(*peerapi.RemoteFS); remote {
+		return nil
+	}
+	for _, c := range strings.Split(rest, "/") {
+		if !shares.ValidName(f.goos, c) {
+			return vfs.E(vfs.CodeInvalidName, "%q is not a valid file name here", c)
+		}
+	}
+	return nil
+}
+
 func (f *fileSystem) openWrite(ctx context.Context, name string, l loc, flag int) (webdav.File, error) {
 	if l.depth < 3 {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
@@ -591,6 +608,9 @@ func (f *fileSystem) openWrite(ctx context.Context, name string, l loc, flag int
 	}
 	if ro {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
+	}
+	if err := f.checkName(fsys, l.rest); err != nil {
+		return nil, f.pathErr(ctx, "open", name, err)
 	}
 	if p := l.parent(); p.depth >= 3 {
 		pi, err := f.stat(ctx, p)
@@ -623,6 +643,9 @@ func (f *fileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) e
 	}
 	fsys, _, err := f.target(ctx, l)
 	if err != nil {
+		return f.pathErr(ctx, "mkdir", name, err)
+	}
+	if err := f.checkName(fsys, l.rest); err != nil {
 		return f.pathErr(ctx, "mkdir", name, err)
 	}
 	defer f.changed(l)
@@ -670,6 +693,9 @@ func (f *fileSystem) Rename(ctx context.Context, oldName, newName string) error 
 	}
 	fsys, _, err := f.target(ctx, from)
 	if err != nil {
+		return f.pathErr(ctx, "rename", oldName, err)
+	}
+	if err := f.checkName(fsys, to.rest); err != nil {
 		return f.pathErr(ctx, "rename", oldName, err)
 	}
 	defer f.changed(from)
