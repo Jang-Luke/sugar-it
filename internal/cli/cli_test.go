@@ -338,3 +338,26 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatalf("--version output %q lacks the injected version", out.String())
 	}
 }
+
+func TestLsMarksSymlinks(t *testing.T) {
+	h := newHost(t, "a")
+	dir := t.TempDir()
+	h.ok("share", "add", "s", dir)
+	write(t, filepath.Join(dir, "file.txt"), "12345")
+	if err := os.Symlink("file.txt", filepath.Join(dir, "link")); err != nil {
+		t.Skip(err)
+	}
+	out := h.ok("ls", "local:s")
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "link") {
+			line = l
+		}
+	}
+	if !strings.HasSuffix(line, "link@") || !strings.HasPrefix(line, "-") {
+		t.Errorf("symlink line %q in:\n%s", line, out)
+	}
+	if !strings.Contains(out, "5 B") {
+		t.Errorf("file size missing:\n%s", out)
+	}
+}

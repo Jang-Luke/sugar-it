@@ -57,8 +57,11 @@ func (e *env) lsCmd() *cobra.Command {
 			tw := newTable(e.stdout)
 			for _, en := range entries {
 				name, size := en.Name, humanSize(en.Size)
-				if en.Type == vfs.TypeDir {
+				switch en.Type {
+				case vfs.TypeDir:
 					name, size = name+"/", "-"
+				case vfs.TypeSymlink: // not followed, so no size of its own to show
+					name, size = name+"@", "-"
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\n", size, humanTime(en.ModTime), name)
 			}
