@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -33,7 +34,8 @@ const (
 // Options configures Start. An empty address means the configured one.
 type Options struct {
 	ConfigDir, ListenAddr, ControlAddr, DAVAddr string
-	InProcess                                   bool // hosted by the desktop app
+	AdvertiseAddrs                              []string // saved to the config once the lock is held
+	InProcess                                   bool     // hosted by the desktop app
 }
 
 // Daemon is a running host.
@@ -51,6 +53,7 @@ type Daemon struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	failed   chan error // receives the first listener failure
 	mu       sync.Mutex
 	serveErr error
 	stopOnce sync.Once
@@ -113,6 +116,15 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(o.AdvertiseAddrs) > 0 {
+		if err := cfgStore.Update(func(c *config.Config) error {
+			c.AdvertiseAddrs = slices.Clone(o.AdvertiseAddrs)
+			return nil
+		}); err != nil {
+			lock.Close()
+			return nil, err
+		}
+	}
 	pick := func(override, configured string) string {
 		if override != "" {
 			return override
@@ -120,7 +132,7 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 		return configured
 	}
 
-	d := &Daemon{dir: dir, lock: lock, stopped: make(chan struct{})}
+	d := &Daemon{dir: dir, lock: lock, stopped: make(chan struct{}), failed: make(chan error, 1)}
 	ok := false
 	defer func() {
 		if !ok {
@@ -224,6 +236,7 @@ func (d *Daemon) fail(err error) {
 	d.mu.Lock()
 	if d.serveErr == nil {
 		d.serveErr = err
+		d.failed <- err // buffered, and only the first failure sends
 	}
 	d.mu.Unlock()
 	go d.Shutdown(context.Background())
@@ -263,6 +276,10 @@ func (d *Daemon) DAVAddr() string { return d.rt.DAVAddr }
 
 // Node is the running node.
 func (d *Daemon) Node() *node.Node { return d.n }
+
+// Failed receives the error of a listener that died on its own. The daemon
+// is shutting itself down by then; Wait returns once that has finished.
+func (d *Daemon) Failed() <-chan error { return d.failed }
 
 // Wait blocks until the daemon has stopped, whether by Shutdown, by its
 // context, or because a listener failed, and returns that failure if any.

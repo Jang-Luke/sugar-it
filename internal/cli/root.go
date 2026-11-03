@@ -163,31 +163,25 @@ func (e *env) daemonCmd() *cobra.Command {
 		RunE: plain(func(cmd *cobra.Command, _ []string) error {
 			// Execute's context ends on SIGINT and SIGTERM.
 			ctx := cmd.Context()
-			dir := e.dir()
-			if len(advertise) > 0 {
-				store, err := config.Open(dir)
-				if err != nil {
-					return err
-				}
-				if err := store.Update(func(c *config.Config) error {
-					c.AdvertiseAddrs = append([]string(nil), advertise...)
-					return nil
-				}); err != nil {
-					return err
-				}
-			}
-			d, err := daemon.Start(ctx, daemon.Options{ConfigDir: e.configDir, ListenAddr: listen, ControlAddr: ctl, DAVAddr: dav})
+			d, err := daemon.Start(ctx, daemon.Options{ConfigDir: e.configDir, ListenAddr: listen, ControlAddr: ctl, DAVAddr: dav, AdvertiseAddrs: advertise})
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(e.stderr, "sugar-it daemon running: peer %s, control %s, webdav %s\n", d.PeerAddr(), d.ControlAddr(), d.DAVAddr())
-			<-ctx.Done()
+			var failure error
+			select {
+			case <-ctx.Done():
+			case failure = <-d.Failed():
+			}
 			sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if err := d.Shutdown(sctx); err != nil {
 				return err
 			}
-			return d.Wait()
+			if err := d.Wait(); err != nil {
+				return err
+			}
+			return failure
 		}),
 	}
 	cmd.Flags().StringVar(&listen, "listen", "", "Peer API address (default: configured, :7443)")

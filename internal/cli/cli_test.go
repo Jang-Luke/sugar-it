@@ -132,13 +132,17 @@ func TestPairAndShareFlow(t *testing.T) {
 }
 
 func TestPeerRenameAndRemove(t *testing.T) {
-	a, b, _, _ := pair(t)
+	_, b, _, _ := pair(t)
 	b.ok("peer", "rename", "bee")
-	b.ok("peer", "remove", "a")
-	if out := b.ok("peer", "list"); strings.Contains(out, "a ") {
-		t.Fatalf("peer a still listed: %q", out)
+	var st struct{ Name string }
+	if err := json.Unmarshal([]byte(b.ok("status", "--json")), &st); err != nil || st.Name != "bee" {
+		t.Fatalf("status after rename: %v %+v", err, st)
 	}
-	_ = a
+	b.ok("peer", "remove", "a")
+	var peers []struct{ Name string }
+	if err := json.Unmarshal([]byte(b.ok("peer", "list", "--json")), &peers); err != nil || len(peers) != 0 {
+		t.Fatalf("peers after remove: %v %+v", err, peers)
+	}
 }
 
 func TestCpWaitsAndExitCodes(t *testing.T) {
