@@ -684,3 +684,59 @@ func TestShutdownPastItsDeadlineStillReportsStopped(t *testing.T) {
 		}
 	}
 }
+
+// The Control API's token and the WebDAV tree are for this machine only.
+func TestNonLoopbackControlAndDAVRefused(t *testing.T) {
+	bad := []string{"0.0.0.0:0", ":0", "[::]:0", "192.0.2.1:0", "example.com:0", "127.0.0.1", ""}
+	for kind, opts := range map[string]func(*config.Config, string){
+		"control": func(c *config.Config, a string) { c.ControlAddr = a },
+		"dav":     func(c *config.Config, a string) { c.DAVAddr = a },
+	} {
+		for _, addr := range bad {
+			t.Run(kind+"/"+addr, func(t *testing.T) {
+				dir, o := setup(t, "a")
+				cfg, err := config.Open(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := cfg.Update(func(c *config.Config) error { opts(c, addr); return nil }); err != nil {
+					t.Fatal(err)
+				}
+				d, err := daemon.Start(bg, o)
+				if err == nil {
+					stop(t, d)
+					t.Fatalf("started with %s on %q", kind, addr)
+				}
+				if !strings.Contains(err.Error(), "loopback") {
+					t.Errorf("unclear error: %v", err)
+				}
+			})
+		}
+	}
+	// Options are held to the same rule as the config.
+	dir, _ := setup(t, "a")
+	if d, err := daemon.Start(bg, daemon.Options{ConfigDir: dir, ControlAddr: "0.0.0.0:0"}); err == nil {
+		stop(t, d)
+		t.Error("started with an override of 0.0.0.0")
+	}
+	if d, err := daemon.Start(bg, daemon.Options{ConfigDir: dir, DAVAddr: ":0"}); err == nil {
+		stop(t, d)
+		t.Error("started with an override with no host")
+	}
+	// A refusal leaves nothing behind.
+	if d, err := daemon.Start(bg, daemon.Options{ConfigDir: dir, ControlAddr: "localhost:0", DAVAddr: "127.0.0.1:0", ListenAddr: "127.0.0.1:0"}); err != nil {
+		t.Errorf("loopback addresses after a refusal: %v", err)
+	} else {
+		stop(t, d)
+	}
+}
+
+// The Peer API is meant to be reachable: the rule is not for it.
+func TestPeerListenerMayBindAnyAddress(t *testing.T) {
+	_, o := setup(t, "a")
+	o.ListenAddr = ":0"
+	d := start(t, o)
+	if !strings.Contains(d.ControlAddr(), "127.0.0.1") {
+		t.Errorf("control on %s", d.ControlAddr())
+	}
+}

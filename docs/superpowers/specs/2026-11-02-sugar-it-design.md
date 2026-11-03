@@ -26,6 +26,8 @@
 | Control API | `127.0.0.1:7444` | Bearer 토큰 (`control.token`) | CLI, GUI |
 | WebDAV | `127.0.0.1:7445` | Basic (`sugar-it` / 제어 토큰) | OS 드라이브 마운트 |
 
+Control API와 WebDAV는 루프백 주소에서만 연다. 설정이나 옵션의 주소가 루프백이 아니면(`0.0.0.0`, 호스트가 빈 `:7444` 포함) 데몬은 명확한 오류를 내고 시작하지 않는다.
+
 설정 경로는 `os.UserConfigDir()/sugar-it`이고, `--config-dir`로 바꿀 수 있다.
 
 ## 3. 신원과 신뢰

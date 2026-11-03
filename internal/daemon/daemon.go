@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -68,6 +69,19 @@ func listen(kind, addr string) (net.Listener, error) {
 	return ln, nil
 }
 
+// requireLoopback refuses an address other machines could reach. The Control and
+// WebDAV APIs trust whoever holds the token, and it travels in the clear. No
+// host at all (":7444") means every interface.
+func requireLoopback(kind, addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		if ip, perr := netip.ParseAddr(host); host == "localhost" || (perr == nil && ip.Unmap().IsLoopback()) {
+			return nil
+		}
+	}
+	return vfs.E(vfs.CodeInvalidRequest, "the %s API must listen on a loopback address such as 127.0.0.1:port, not %q", kind, addr)
+}
+
 // lockName is held for as long as a daemon runs on a config directory.
 const lockName = "daemon.lock"
 
@@ -112,6 +126,19 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
+	pick := func(override, configured string) string {
+		if override != "" {
+			return override
+		}
+		return configured
+	}
+	controlAddr, davAddr := pick(o.ControlAddr, cfg.ControlAddr), pick(o.DAVAddr, cfg.DAVAddr)
+	if err := requireLoopback("Control", controlAddr); err != nil {
+		return nil, err
+	}
+	if err := requireLoopback("WebDAV", davAddr); err != nil {
+		return nil, err
+	}
 	lock, err := acquireLock(dir)
 	if err != nil {
 		return nil, err
@@ -124,12 +151,6 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 			lock.Close()
 			return nil, err
 		}
-	}
-	pick := func(override, configured string) string {
-		if override != "" {
-			return override
-		}
-		return configured
 	}
 
 	d := &Daemon{dir: dir, lock: lock, stopped: make(chan struct{}), failed: make(chan error, 1)}
@@ -145,9 +166,9 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 		}
 	}()
 	for i, b := range []struct{ kind, addr string }{
-		{"control", pick(o.ControlAddr, cfg.ControlAddr)},
+		{"control", controlAddr},
 		{"peer", pick(o.ListenAddr, cfg.ListenAddr)},
-		{"dav", pick(o.DAVAddr, cfg.DAVAddr)},
+		{"dav", davAddr},
 	} {
 		if d.lns[i], err = listen(b.kind, b.addr); err != nil {
 			return nil, err

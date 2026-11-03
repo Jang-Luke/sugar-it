@@ -58,7 +58,8 @@ trusting the warning dialog either way. `checksums.txt` does not cover the
 Hosts connect to each other on **TCP 7443** (the Peer API, TLS 1.3). Allow
 inbound TCP 7443 on every host that other hosts must reach. The Control API
 (`127.0.0.1:7444`) and the WebDAV server (`127.0.0.1:7445`) listen on loopback
-only and need no firewall rule.
+only and need no firewall rule; the daemon refuses to start with any other
+address for them.
 
 ## Quickstart: two hosts
 
