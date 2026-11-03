@@ -17,9 +17,18 @@ export function describeMount(r: MountResult): MountView {
  * mount-failed heading plus the detail instead of "internal error".
  */
 export function mountFailure(e: unknown): { heading: string; detail: string } {
+  return commandFailure(e, ko.hosts.mountFailed)
+}
+
+/** A failed service install or uninstall, shown like a failed mount. */
+export function serviceFailure(e: unknown): { heading: string; detail: string } {
+  return commandFailure(e, ko.hosts.serviceFailed)
+}
+
+function commandFailure(e: unknown, failedHeading: string): { heading: string; detail: string } {
   const { code, message } = parseError(e)
   if (code !== 'internal' && code in ko.errors) {
     return { heading: ko.errors[code as keyof typeof ko.errors], detail: '' }
   }
-  return { heading: ko.hosts.mountFailed, detail: message }
+  return { heading: failedHeading, detail: message }
 }

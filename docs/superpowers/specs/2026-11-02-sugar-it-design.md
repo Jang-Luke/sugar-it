@@ -166,6 +166,6 @@ sugar-it service install | uninstall
 - `sugar-it service install`
   - Linux: `systemd --user` 유닛과 `loginctl enable-linger`
   - macOS: LaunchAgent
-  - Windows: 로그온 시 실행되는 예약 작업
+  - Windows: 사용자 Run 레지스트리 값(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 `sugar-it`, `reg add`/`reg delete`). 예약 작업(`schtasks /SC ONLOGON`)은 관리자 권한이 필요해 쓰지 않는다. 설치해도 데몬을 바로 시작하지 않고 다음 로그인부터 실행된다. 이미 지워진 값을 제거하는 것은 오류가 아니다. 콘솔 프로그램인 `sugar-it.exe`를 등록하면 로그인 때 콘솔 창이 뜨고, GUI 프로그램인 `sugar-it-desktop.exe`는 뜨지 않는다.
   - 사용자의 파일과 설정에 접근하도록 모두 사용자 권한으로 실행한다.
 - GUI의 서비스 설치는 앱 옆에 `sugar-it`가 있으면 그것을, 없으면 `sugar-it-desktop daemon`을 실행하도록 등록한다. 데스크톱 패키지에는 CLI가 없고 Finder에서 띄운 앱에는 사용자의 `PATH`가 없으므로 `PATH`는 찾지 않는다.

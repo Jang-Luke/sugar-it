@@ -195,6 +195,8 @@ export const ko = {
     serviceHelp: '로그인할 때 sugar-it을 자동으로 실행합니다. 앱을 닫아도 공유가 계속됩니다.',
     serviceInstall: '서비스 설치',
     serviceDone: '서비스를 설치했습니다.',
+    serviceFailed: '서비스를 설치하거나 제거하지 못했습니다.',
+    serviceNextLogon: 'Windows에서는 다음 로그인부터 적용됩니다. 지금 바로 시작하지 않으며, 이 앱이 공유를 실행 중이면 앱을 닫을 때까지 앱이 계속 실행합니다.',
     serviceUninstall: '서비스 제거',
     serviceUninstallTitle: '서비스 제거',
     serviceUninstallMessage: '백그라운드 서비스를 멈추고 제거합니다. 공유한 폴더와 설정은 그대로 남습니다.',

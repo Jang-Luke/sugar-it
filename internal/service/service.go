@@ -1,5 +1,5 @@
 // Package service installs sugar-it as a per-user background service: a
-// systemd user unit on Linux, a LaunchAgent on macOS, a logon task on Windows.
+// systemd user unit on Linux, a LaunchAgent on macOS, a per-user Run key value on Windows (a scheduled task needs elevation).
 // Everything runs with the user's own rights. Plan and UninstallPlan are pure;
 // Install and Uninstall execute them.
 package service
@@ -21,7 +21,8 @@ import (
 const (
 	unitName    = "sugar-it.service"
 	launchLabel = "io.sugar-it.daemon"
-	taskName    = "sugar-it"
+	runValue    = "sugar-it"
+	runKey      = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 )
 
 // Unit is a service definition: the file to write (none when Path is empty)
@@ -29,6 +30,10 @@ const (
 type Unit struct {
 	Path, Content string
 	Commands      [][]string
+	Notes         []string // printed after a successful install
+	// Probe, when set, is run first by Uninstall: if it fails there is nothing
+	// registered, which counts as already uninstalled.
+	Probe []string
 }
 
 // Plan builds the install plan for goos. exe is the sugar-it binary, home the
@@ -72,14 +77,17 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 		b.WriteString("\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>KeepAlive</key>\n\t<true/>\n</dict>\n</plist>\n")
 		return Unit{Path: p, Content: b.String(), Commands: [][]string{{"launchctl", "load", "-w", p}}}, nil
 	case "windows":
-		tr := `"` + exe + `" daemon`
+		// The value is a command line that Windows parses at logon with the C
+		// runtime rules, so a trailing backslash before the closing quote is
+		// doubled. os/exec escapes the whole argument again for reg itself.
+		v := `"` + exe + `" daemon`
 		if configDir != "" {
-			tr += ` --config-dir "` + configDir + `"`
+			v += ` --config-dir "` + configDir + strings.Repeat(`\`, trailingBackslashes(configDir)) + `"`
 		}
-		return Unit{Commands: [][]string{
-			{"schtasks", "/Create", "/SC", "ONLOGON", "/TN", taskName, "/TR", tr, "/RL", "LIMITED", "/F"},
-			{"schtasks", "/Run", "/TN", taskName},
-		}}, nil
+		return Unit{
+			Commands: [][]string{{"reg", "add", runKey, "/v", runValue, "/t", "REG_SZ", "/d", v, "/f"}},
+			Notes:    []string{"sugar-it will start at your next logon. It does not start now; if the desktop app is running the daemon, that continues until the app closes."},
+		}, nil
 	}
 	return Unit{}, fmt.Errorf("services are not supported on %s", goos)
 }
@@ -95,9 +103,20 @@ func UninstallPlan(goos, home string) (Unit, error) {
 		p := darwinPath(home)
 		return Unit{Path: p, Commands: [][]string{{"launchctl", "unload", "-w", p}}}, nil
 	case "windows":
-		return Unit{Commands: [][]string{{"schtasks", "/End", "/TN", taskName}, {"schtasks", "/Delete", "/TN", taskName, "/F"}}}, nil
+		return Unit{
+			Probe:    []string{"reg", "query", runKey, "/v", runValue},
+			Commands: [][]string{{"reg", "delete", runKey, "/v", runValue, "/f"}},
+		}, nil
 	}
 	return Unit{}, fmt.Errorf("services are not supported on %s", goos)
+}
+
+func trailingBackslashes(s string) int {
+	n := 0
+	for strings.HasSuffix(s[:len(s)-n], `\`) {
+		n++
+	}
+	return n
 }
 
 func darwinPath(home string) string {
@@ -148,6 +167,9 @@ func InstallWith(ctx context.Context, r Runner, u Unit, out io.Writer) error {
 			return err
 		}
 	}
+	for _, n := range u.Notes {
+		fmt.Fprintln(out, n)
+	}
 	return nil
 }
 
@@ -160,6 +182,10 @@ func Uninstall(ctx context.Context, u Unit, out io.Writer) error {
 // UninstallWith is Uninstall with an explicit Runner.
 func UninstallWith(ctx context.Context, r Runner, u Unit, out io.Writer) error {
 	var errs []error
+	if len(u.Probe) > 0 && r.Run(ctx, u.Probe, io.Discard) != nil {
+		fmt.Fprintln(out, "sugar-it is not installed as a background service.")
+		return nil
+	}
 	for _, c := range u.Commands {
 		if err := r.Run(ctx, c, out); err != nil {
 			errs = append(errs, err)

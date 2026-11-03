@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
   import { ko } from '../ko'
-  import { describeMount, mountFailure, type MountView } from '../lib/mount'
+  import { describeMount, mountFailure, serviceFailure, type MountView } from '../lib/mount'
   import { parseError, type Api, type ApiError, type AppState, type MountResult, type ShareInfo, type Status } from '../lib/api'
   import { errorText } from '../lib/transfers'
   import { formatTime } from '../lib/format'
@@ -28,6 +28,7 @@
   let mountView: MountView | null = null
   let mountError: { heading: string; detail: string } | null = null
   let serviceOutput = ''
+  let serviceError: { heading: string; detail: string } | null = null
   let newName = ''
   let confirm: null | { kind: 'peer' | 'share' | 'service'; name: string } = null
 
@@ -48,6 +49,22 @@
       return await f()
     } catch (e) {
       err = parseError(e)
+      return undefined
+    } finally {
+      busy = false
+    }
+  }
+
+  // Like run, but a failure shows the service-failed heading and the detail.
+  async function svcRun<T>(f: () => Promise<T>): Promise<T | undefined> {
+    err = null
+    info = ''
+    serviceError = null
+    busy = true
+    try {
+      return await f()
+    } catch (e) {
+      serviceError = serviceFailure(e)
       return undefined
     } finally {
       busy = false
@@ -121,7 +138,7 @@
     if (!confirm) return
     const { kind, name } = confirm
     if (kind === 'service') {
-      const r = await run(() => api.uninstallService())
+      const r = await svcRun(() => api.uninstallService())
       confirm = null
       if (r) {
         serviceOutput = r.Output
@@ -177,7 +194,7 @@
   }
 
   async function installService() {
-    const r = await run(() => api.installService())
+    const r = await svcRun(() => api.installService())
     if (r) {
       serviceOutput = r.Output
       info = ko.hosts.serviceDone
@@ -315,6 +332,13 @@
       <button disabled={busy} on:click={installService}>{ko.hosts.serviceInstall}</button>
       <button class="danger" disabled={busy} on:click={() => (confirm = { kind: 'service', name: 'sugar-it' })}>{ko.hosts.serviceUninstall}</button>
     </div>
+    {#if platform === 'windows'}<p class="muted">{ko.hosts.serviceNextLogon}</p>{/if}
+    {#if serviceError}
+      <div class="banner bad" role="alert">
+        <strong>{serviceError.heading}</strong>
+        {#if serviceError.detail}<pre class="mono out">{serviceError.detail}</pre>{/if}
+      </div>
+    {/if}
     {#if serviceOutput}<pre class="mono out">{serviceOutput}</pre>{/if}
   </div>
 </div>

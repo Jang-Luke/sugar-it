@@ -190,8 +190,15 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   prompt) shared by `sugar-it mount` and the desktop app. That call has not
   been run on Windows; neither remote name form is documented for WebDAV by
   the WNet pages.
-- `sugar-it service install` keeping working on Windows; see the Defender note
-  below. Running it as a non-administrator has not been tried.
+- `sugar-it service install` on Windows. It now writes a per-user Run key value
+  with `reg add` instead of a scheduled task (`schtasks /SC ONLOGON` failed
+  with "exit status 1" in the desktop app, which runs without elevation). The
+  daemon is not started by the install; it starts at the next logon, and if
+  the desktop app is running the daemon, only after the app closes. None of
+  this has been run on Windows. `sugar-it.exe` is a console program, so
+  registering it shows a console window at logon; `sugar-it-desktop.exe`
+  (what the desktop app registers when no `sugar-it` sits beside it) is a GUI
+  program and shows none.
 - The desktop app walk-through (no display on the build host). Its Go and
   front-end tests pass; the window has never been opened.
 - The macOS and Windows desktop assets have been built by the release workflow
@@ -205,9 +212,12 @@ depends on NTFS, where Linux and macOS sync the directory first.
 
 **Windows Defender**: in one test, Defender reported `Behavior:Win32/Execution.A!ml`
 and removed `sugar-it.exe` and its scheduled task shortly after
-`sugar-it service install` and `schtasks /Run`. That binary was unsigned, in
-`%TEMP%`, and run over SSH, so an installed copy may behave differently; this
-has not been tested. If it happens to you, Windows Security shows the detection.
+`sugar-it service install` and `schtasks /Run`. That observation stands as
+recorded for the scheduled-task version; the service now uses a Run key and no
+`schtasks /Run`, and whether Defender detects that is unknown. That binary was
+unsigned, in `%TEMP%`, and run over SSH, so an installed copy may behave
+differently; this has not been tested. If it happens to you, Windows Security
+shows the detection.
 
 ## Development
 

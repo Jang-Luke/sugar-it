@@ -142,7 +142,15 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     Korean and lists the `reg add` commands (needing an administrator prompt)
     instead of showing an error; other failures show "마운트하지 못했습니다."
     with the detail.
-11. "서비스 설치" installs the per-user service (Linux: `systemctl --user status
+11. Windows: "서비스 설치" runs `reg add HKCU\...\Run /v sugar-it`; no
+    elevation is needed and the daemon does not start now, only at the next
+    logon (the card says so in Korean). Check the value with `reg query
+    HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v sugar-it`, log
+    out and in, and see whether the daemon runs and whether a console window
+    appears (expected only for `sugar-it.exe`). "서비스 제거" twice: the second
+    run must not fail. A failed install shows "서비스를 설치하거나 제거하지
+    못했습니다." plus the detail. Not yet run on Windows.
+    Other systems: "서비스 설치" installs the per-user service (Linux: `systemctl --user status
     sugar-it`). While the app itself runs the daemon, the service fails to take
     the config-directory lock and retries every 5 seconds until the app closes.
     "서비스 제거" asks first, then stops and removes the service.
