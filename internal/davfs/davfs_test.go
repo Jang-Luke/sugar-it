@@ -32,6 +32,7 @@ type countFS struct {
 	putErr          error
 	listHook        func(ctx context.Context) error
 	opens           atomic.Int64
+	wrapOpen        func(io.ReadCloser) io.ReadCloser // replaces the stream Open returns
 }
 
 func (c *countFS) Stat(ctx context.Context, p string) (vfs.Entry, error) {
@@ -60,7 +61,11 @@ func (c *countFS) Open(ctx context.Context, p string, off int64, etag string) (i
 	if c.beforeOpen != nil {
 		c.beforeOpen(n)
 	}
-	return c.FS.Open(ctx, p, off, etag)
+	rc, e, err := c.FS.Open(ctx, p, off, etag)
+	if err == nil && c.wrapOpen != nil {
+		rc = c.wrapOpen(rc)
+	}
+	return rc, e, err
 }
 
 type fakeShare struct {

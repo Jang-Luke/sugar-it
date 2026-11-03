@@ -120,6 +120,11 @@ host; do not use invitations from a host you removed.
 asks the OS to mount it. The WebDAV user is `sugar-it` and the password is the
 control token, which the command prints when the OS asks for it.
 
+Moving or copying onto an existing file replaces it atomically, keeping the old
+file if anything fails. Moving or copying a folder onto something that exists,
+or anything onto an existing folder, is refused (HTTP 412): delete the
+destination first.
+
 Windows limits (from the Windows WebClient service, not from sugar-it):
 
 - Basic authentication over plain HTTP is disabled by default

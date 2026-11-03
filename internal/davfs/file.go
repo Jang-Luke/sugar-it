@@ -156,6 +156,20 @@ func (f *readFile) Seek(off int64, whence int) (int64, error) {
 }
 
 func (f *readFile) Read(b []byte) (int, error) {
+	n, err := f.read(b)
+	if err != nil && err != io.EOF {
+		// A COPY must not publish what it got so far; see reqState.
+		if rs := stateOf(f.ctx); rs != nil && rs.copyMove {
+			rs.readFailed = true
+			if st := statusOfErr(err); st != 0 && rs.status == 0 {
+				rs.status = st
+			}
+		}
+	}
+	return n, err
+}
+
+func (f *readFile) read(b []byte) (int, error) {
 	if err := f.ensure(); err != nil {
 		return 0, err
 	}
@@ -272,6 +286,9 @@ func (w *writeFile) Close() error {
 		return errors.New("upload spool failed")
 	}
 	if st, _ := w.ctx.Value(bodyKey{}).(*bodyState); st != nil && st.broken() {
+		return io.ErrUnexpectedEOF
+	}
+	if rs := stateOf(w.ctx); rs != nil && rs.readFailed {
 		return io.ErrUnexpectedEOF
 	}
 	if _, err := w.spool.Seek(0, io.SeekStart); err != nil {

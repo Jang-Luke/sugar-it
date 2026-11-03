@@ -7,7 +7,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -21,6 +23,7 @@ import (
 	"golang.org/x/net/webdav"
 
 	"sugarintegration/internal/peerapi"
+	"sugarintegration/internal/shares"
 	"sugarintegration/internal/transfer"
 	"sugarintegration/internal/vfs"
 )
@@ -72,12 +75,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
-	if !h.preflight(w, r) {
+	rs := &reqState{}
+	r = r.WithContext(context.WithValue(r.Context(), reqKey{}, rs))
+	if !h.preflight(w, r, rs) {
 		return
 	}
-	rs := &reqState{}
 	w = &statusWriter{ResponseWriter: w, rs: rs}
-	r = r.WithContext(context.WithValue(r.Context(), reqKey{}, rs))
 	if r.Method == http.MethodPut {
 		st := &bodyState{want: r.ContentLength}
 		r.Body = &trackBody{ReadCloser: r.Body, st: st}
@@ -112,9 +115,10 @@ func loopbackHost(hostport string) bool {
 
 // preflight answers what x/net's handler cannot express: it maps most
 // filesystem errors to 404 or 405. It rejects writes to virtual directories
-// and read-only shares (403), cross-share MOVE (502) and unreachable peers
-// (5xx, within a few seconds). It returns false once it has replied.
-func (h *handler) preflight(w http.ResponseWriter, r *http.Request) bool {
+// and read-only shares (403), cross-share MOVE (502), unreachable peers (5xx,
+// within a few seconds), and the MOVE and COPY cases x/net would destroy data
+// on: see copyMove. It returns false once it has replied.
+func (h *handler) preflight(w http.ResponseWriter, r *http.Request, rs *reqState) bool {
 	if r.Method == http.MethodOptions {
 		return true
 	}
@@ -154,8 +158,15 @@ func (h *handler) preflight(w http.ResponseWriter, r *http.Request) bool {
 		return check(src, false)
 	case "MOVE", "COPY":
 		move := r.Method == "MOVE"
+		rs.copyMove = true
 		if !check(src, move) {
 			return false
+		}
+		// A retried MOVE must not trust a listing from before the first try.
+		h.fs.dropList(src)
+		si, err := h.fs.stat(ctx, src)
+		if err != nil {
+			return fail(preflightStatus(err), errText(err))
 		}
 		u, err := url.Parse(r.Header.Get("Destination"))
 		if err != nil || r.Header.Get("Destination") == "" || (u.Host != "" && u.Host != r.Host) {
@@ -168,7 +179,30 @@ func (h *handler) preflight(w http.ResponseWriter, r *http.Request) bool {
 		if src.depth >= 3 && dst.depth >= 3 && src.peer == dst.peer && src.share == dst.share && related(src.rest, dst.rest) {
 			return fail(http.StatusForbidden, "the destination is the source, contains it or lies inside it")
 		}
-		return check(dst, true)
+		if !check(dst, true) {
+			return false
+		}
+		h.fs.dropList(dst)
+		di, err := h.fs.stat(ctx, dst)
+		if errors.Is(err, os.ErrNotExist) || vfs.CodeOf(err) == vfs.CodeNotFound {
+			return true
+		}
+		if err != nil {
+			return fail(preflightStatus(err), errText(err))
+		}
+		// x/net's reading of the header: a MOVE needs T, a COPY only not F.
+		overwrite := r.Header.Get("Overwrite") == "T"
+		if !move {
+			overwrite = r.Header.Get("Overwrite") != "F"
+		}
+		if !overwrite {
+			return true // x/net answers 412 and touches nothing
+		}
+		if si.dir || di.dir {
+			return fail(http.StatusPreconditionFailed, "a folder is not overwritten: delete the destination first")
+		}
+		rs.staged = &dst
+		return true
 	}
 	if !check(src, false) {
 		return false
@@ -217,6 +251,9 @@ func preflightStatus(err error) int {
 	if st := statusOfErr(err); st != 0 {
 		return st
 	}
+	if errors.Is(err, os.ErrNotExist) {
+		return http.StatusNotFound
+	}
 	switch vfs.CodeOf(err) {
 	case vfs.CodePeerNotFound, vfs.CodeShareNotFound, vfs.CodeNotFound:
 		return http.StatusNotFound
@@ -229,7 +266,26 @@ func preflightStatus(err error) int {
 // answers with an error status of its own choosing.
 type reqKey struct{}
 
-type reqState struct{ status int }
+type reqState struct {
+	status int
+
+	// copyMove marks a MOVE or COPY. x/net deletes an existing destination
+	// before the replacement exists, and for a COPY closes the new file even
+	// when reading the source failed, which would publish it truncated. So
+	// in such a request RemoveAll never deletes anything and a file whose
+	// source failed is not published. An overwrite only reaches x/net as a
+	// file replacing a file (staged): a COPY goes through writeFile's spool and
+	// a MOVE through replace, both ending in an atomic Put. Staying inside
+	// x/net keeps its lock checks and statuses.
+	copyMove   bool
+	staged     *loc // the destination being replaced; nil if there is none
+	readFailed bool // a COPY could not read its source
+}
+
+func stateOf(ctx context.Context) *reqState {
+	rs, _ := ctx.Value(reqKey{}).(*reqState)
+	return rs
+}
 
 type statusWriter struct {
 	http.ResponseWriter
@@ -337,7 +393,7 @@ func (f *fileSystem) pathErr(ctx context.Context, op, name string, err error) er
 		return nil
 	}
 	if st := statusOfErr(err); st != 0 {
-		if rs, _ := ctx.Value(reqKey{}).(*reqState); rs != nil && rs.status == 0 {
+		if rs := stateOf(ctx); rs != nil && rs.status == 0 {
 			rs.status = st
 		}
 	}
@@ -580,6 +636,13 @@ func (f *fileSystem) RemoveAll(ctx context.Context, name string) error {
 	if l.depth < 3 {
 		return &os.PathError{Op: "remove", Path: name, Err: os.ErrPermission}
 	}
+	if rs := stateOf(ctx); rs != nil && rs.copyMove {
+		if rs.staged != nil && *rs.staged == l {
+			return nil // replaced atomically later, once the new file exists
+		}
+		// It appeared after the preflight: this request did not agree to that.
+		return &os.PathError{Op: "remove", Path: name, Err: os.ErrPermission}
+	}
 	fsys, _, err := f.target(ctx, l)
 	if err != nil {
 		return f.pathErr(ctx, "remove", name, err)
@@ -609,11 +672,85 @@ func (f *fileSystem) Rename(ctx context.Context, oldName, newName string) error 
 	if err != nil {
 		return f.pathErr(ctx, "rename", oldName, err)
 	}
-	ctx, cancel, mapErr := metaCtx(ctx)
-	defer cancel()
 	defer f.changed(from)
 	defer f.changed(to)
+	if rs := stateOf(ctx); rs != nil && rs.staged != nil && *rs.staged == to {
+		return f.pathErr(ctx, "rename", oldName, replace(ctx, fsys, from.rest, to.rest))
+	}
+	ctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
 	return f.pathErr(ctx, "rename", oldName, mapErr(fsys.Rename(ctx, from.rest, to.rest)))
+}
+
+// replace moves the file from over the file to, which vfs.FS.Rename refuses:
+// it reads the source into a private spool and Puts it atomically, and removes
+// the source only after that. On any failure the old destination is intact, or
+// already the complete new file; either way the source is still there.
+func replace(ctx context.Context, fsys vfs.FS, from, to string) error {
+	rc, e, err := fsys.Open(ctx, from, 0, "")
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	sp, err := os.CreateTemp("", "sugar-it-dav-*") // 0600, in the OS temp dir
+	if err != nil {
+		return spoolErr(err)
+	}
+	defer func() {
+		sp.Close()
+		os.Remove(sp.Name())
+	}()
+	sum := sha256.New()
+	var read error
+	n, err := io.Copy(io.MultiWriter(sp, sum), readErrTo{rc, &read})
+	switch {
+	case read != nil:
+		return read
+	case err != nil:
+		return spoolErr(err)
+	case n != e.Size:
+		return vfs.E(vfs.CodeChanged, "the source changed while it was being read")
+	}
+	if _, err := sp.Seek(0, io.SeekStart); err != nil {
+		return spoolErr(err)
+	}
+	if _, err := fsys.Put(ctx, to, sp, vfs.PutOptions{Overwrite: true, ModTime: e.ModTime, SHA256: hex.EncodeToString(sum.Sum(nil))}); err != nil {
+		return err
+	}
+	mctx, cancel, mapErr := metaCtx(ctx)
+	defer cancel()
+	after, err := fsys.Stat(mctx, from)
+	if err != nil {
+		return mapErr(err)
+	}
+	if after.ETag != e.ETag {
+		return vfs.E(vfs.CodeChanged, "the source changed while it was being moved; it was kept")
+	}
+	if err := fsys.Remove(mctx, from, false); err != nil && vfs.CodeOf(err) != vfs.CodeNotFound {
+		return mapErr(err)
+	}
+	return nil
+}
+
+// readErrTo tells a read failure of the source apart from a spool write failure.
+type readErrTo struct {
+	r   io.Reader
+	err *error
+}
+
+func (r readErrTo) Read(b []byte) (int, error) {
+	n, err := r.r.Read(b)
+	if err != nil && err != io.EOF {
+		*r.err = err
+	}
+	return n, err
+}
+
+func spoolErr(err error) error {
+	if shares.IsDiskFull(err) {
+		return vfs.E(vfs.CodeDiskFull, "no space left for the temporary copy")
+	}
+	return vfs.E(vfs.CodeInternal, "temporary copy: %s", vfs.PathlessDetail(err))
 }
 
 // changed drops what a write at l may have made stale: the parent's listing

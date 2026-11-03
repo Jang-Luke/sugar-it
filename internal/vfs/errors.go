@@ -3,6 +3,8 @@ package vfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 )
 
 // Error codes shared by the peer API and local callers (spec section 6).
@@ -53,4 +55,19 @@ func CodeOf(err error) string {
 		return e.Code
 	}
 	return CodeInternal
+}
+
+// PathlessDetail is err's text without the file paths that os errors carry.
+// An error message may reach another host, which must not learn local paths;
+// os.Root's files even report absolute ones.
+func PathlessDetail(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Op + ": " + le.Err.Error()
+	}
+	return err.Error()
 }
