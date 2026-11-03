@@ -5,6 +5,7 @@
   import { canDrop, joinPath, type Pane } from '../lib/panes'
   import { errorText } from '../lib/transfers'
   import { formatBytes, formatTime } from '../lib/format'
+  import { EntryLoader } from '../lib/listing'
   import VirtualList from './VirtualList.svelte'
 
   export let api: Api
@@ -26,7 +27,14 @@
   let entries: Entry[] = []
   let error: ApiError | null = null
   let loading = false
-  let seq = 0 // drops replies that arrive after a newer request
+  let sharesSeq = 0 // drops share lists that arrive after a newer request
+  // Rows and selection are emptied the moment a load starts; see EntryLoader.
+  const loader = new EntryLoader(() => {
+    entries = loader.entries
+    error = loader.error
+    loading = loader.loading
+    selected = loader.selected
+  })
   let list: VirtualList
   let over = false
 
@@ -38,19 +46,16 @@
     })),
   )
 
-  const rank = (e: Entry) => (e.Type === 'dir' ? 0 : 1)
-  const sortEntries = (es: Entry[]) =>
-    [...es].sort((a, b) => rank(a) - rank(b) || a.Name.localeCompare(b.Name, 'ko'))
-
   async function loadShares() {
-    const my = ++seq
-    loading = true
-    error = null
+    const my = ++sharesSeq
+    loader.invalidate()
     entries = []
     selected = []
+    loading = true
+    error = null
     try {
       const s = (await api.listShares(pane.peer)) ?? []
-      if (my !== seq) return
+      if (my !== sharesSeq) return
       shares = s
       if (!shares.some((x) => x.Name === pane.share)) pane.share = ''
       if (pane.share === '' && shares.length > 0) pane.share = shares[0].Name
@@ -58,7 +63,7 @@
       loading = false
       if (pane.share !== '') await loadEntries()
     } catch (e) {
-      if (my !== seq) return
+      if (my !== sharesSeq) return
       shares = []
       error = parseError(e)
       loading = false
@@ -67,25 +72,14 @@
 
   export async function loadEntries() {
     if (pane.share === '') {
+      loader.invalidate()
       entries = []
+      selected = []
       return
     }
-    const my = ++seq
-    loading = true
-    error = null
-    try {
-      const es = (await api.list(pane.peer, pane.share, pane.path)) ?? []
-      if (my !== seq) return
-      entries = sortEntries(es)
-      selected = []
-      list?.scrollToTop()
-    } catch (e) {
-      if (my !== seq) return
-      entries = []
-      error = parseError(e)
-    } finally {
-      if (my === seq) loading = false
-    }
+    const { peer, share, path } = pane
+    await loader.load(() => api.list(peer, share, path))
+    if (!error) list?.scrollToTop()
   }
 
   /** Reload what is shown, keeping the folder. */
@@ -98,6 +92,7 @@
   }
 
   function pickPeer(e: Event) {
+    sharesSeq++
     pane.peer = (e.target as HTMLSelectElement).value
     pane.share = ''
     pane.path = ''

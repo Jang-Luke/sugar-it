@@ -166,10 +166,7 @@ func TestDaemonDiesMidSession(t *testing.T) {
 	if _, err := a.Status(); err != nil {
 		t.Fatal(err)
 	}
-	// Shutdown's own return value races with its internal deadline (reported
-	// separately); Wait is the reliable signal that it has finished.
-	d.Shutdown(context.Background())
-	if err := d.Wait(); err != nil {
+	if err := d.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 

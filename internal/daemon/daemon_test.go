@@ -652,3 +652,18 @@ func TestShutdownDuringTransferResumes(t *testing.T) {
 		}
 	}
 }
+
+// Shutdown reports success when it finished within its grace period; its own
+// deadline must not turn a finished shutdown into context.Canceled.
+func TestShutdownReturnsNilWhenFinished(t *testing.T) {
+	_, o := setup(t, "a")
+	for i := 0; i < 30; i++ {
+		d := start(t, o)
+		if err := d.Shutdown(context.Background()); err != nil {
+			t.Fatalf("round %d: Shutdown = %v", i, err)
+		}
+		if err := d.Shutdown(context.Background()); err != nil {
+			t.Fatalf("round %d: second Shutdown = %v", i, err)
+		}
+	}
+}

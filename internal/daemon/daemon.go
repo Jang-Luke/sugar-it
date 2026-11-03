@@ -297,9 +297,12 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 	d.stopOnce.Do(func() {
 		defer close(d.stopped)
 		d.cancel() // node and manager: running attempts stop, jobs stay unfinished
+		// The grace deadline is local: reassigning ctx would cancel the
+		// caller's view of it and race the final select below.
+		gctx := ctx
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, defaultGrace)
+			gctx, cancel = context.WithTimeout(ctx, defaultGrace)
 			defer cancel()
 		}
 		var sw sync.WaitGroup
@@ -307,7 +310,7 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 			sw.Add(1)
 			go func() {
 				defer sw.Done()
-				if s.Shutdown(ctx) != nil {
+				if s.Shutdown(gctx) != nil {
 					s.Close()
 				}
 			}()

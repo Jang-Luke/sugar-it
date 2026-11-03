@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte'
   import { ko } from '../ko'
   import { parseError, type Api, type ApiError, type Conflict, type Entry, type Job, type PeerStatus } from '../lib/api'
-  import { canDrop, joinPath, targetOf, type Pane } from '../lib/panes'
+  import { canDrop, joinPath, snapshotSelection, targetOf, type Pane } from '../lib/panes'
   import { errorText, isActive } from '../lib/transfers'
   import Dialog from '../components/Dialog.svelte'
   import PaneView from '../components/PaneView.svelte'
@@ -24,7 +24,8 @@
   let conflict: Conflict = 'fail'
   let dragSrc: Pane | null = null
   let notice: { ok: boolean; text: string; detail?: string } | null = null
-  let dialog: null | { kind: 'delete' | 'rename' | 'mkdir' } = null
+  // A dialog acts on what was selected when it opened, not on what the pane shows later.
+  let dialog: null | { kind: 'delete' | 'rename' | 'mkdir'; pane: Pane; entries: Entry[]; view: PaneView } = null
   let busy = false
 
   $: src = activeId === 'left' ? left : right
@@ -63,12 +64,16 @@
       notice = { ok: false, text: ko.files.sameFolder }
       return Promise.resolve()
     }
+    // Fix the targets now: navigating while jobs are being started must not change them.
+    const srcs = entries.map((e) => targetOf(from, e))
+    const dstTarget = targetOf(to)
+    const policy = conflict
     return (async () => {
       busy = true
       let started = 0
       try {
-        for (const e of entries) {
-          await api.startJob(op, targetOf(from, e), targetOf(to), conflict)
+        for (const s of srcs) {
+          await api.startJob(op, s, dstTarget, policy)
           started++
         }
         notice = { ok: true, text: ko.files.started(started, op === 'copy' ? ko.files.opCopy : ko.files.opMove) }
@@ -88,10 +93,12 @@
   }
 
   async function doDelete() {
+    if (!dialog) return
+    const { pane: p, entries, view } = dialog
     busy = true
     try {
-      for (const e of srcSel) {
-        await api.remove(src.peer, src.share, joinPath(src.path, e.Name), e.Type === 'dir')
+      for (const e of entries) {
+        await api.remove(p.peer, p.share, joinPath(p.path, e.Name), e.Type === 'dir')
       }
       notice = null
     } catch (e) {
@@ -99,35 +106,39 @@
     } finally {
       busy = false
       dialog = null
-      void srcView?.loadEntries()
+      void view?.loadEntries()
     }
   }
 
   async function doRename(name: string) {
+    if (!dialog) return
+    const { pane: p, entries, view } = dialog
     busy = true
     try {
-      await api.rename(src.peer, src.share, joinPath(src.path, srcSel[0].Name), name.trim())
+      await api.rename(p.peer, p.share, joinPath(p.path, entries[0].Name), name.trim())
       notice = null
     } catch (e) {
       fail(e)
     } finally {
       busy = false
       dialog = null
-      void srcView?.loadEntries()
+      void view?.loadEntries()
     }
   }
 
   async function doMkdir(name: string) {
+    if (!dialog) return
+    const { pane: p, view } = dialog
     busy = true
     try {
-      await api.mkdir(src.peer, src.share, joinPath(src.path, name.trim()))
+      await api.mkdir(p.peer, p.share, joinPath(p.path, name.trim()))
       notice = null
     } catch (e) {
       fail(e)
     } finally {
       busy = false
       dialog = null
-      void srcView?.loadEntries()
+      void view?.loadEntries()
     }
   }
 
@@ -144,11 +155,11 @@
       notice = { ok: false, text: ko.files.renameOne }
       return
     }
-    dialog = { kind }
+    dialog = { kind, ...snapshotSelection(src, srcSel), view: srcView }
   }
 
   $: canMove = canDrop(src, dst) && srcSel.length > 0 && !busy
-  $: shownNames = srcSel.slice(0, 5).map((e) => e.Name)
+  $: shownNames = (dialog?.entries ?? []).slice(0, 5).map((e) => e.Name)
 </script>
 
 <div class="files">
@@ -213,7 +224,7 @@
     title={ko.files.deleteTitle}
     message={ko.files.deleteMessage}
     names={shownNames}
-    extra={srcSel.length > 5 ? ko.files.deleteMore(srcSel.length - 5) : ''}
+    extra={dialog.entries.length > 5 ? ko.files.deleteMore(dialog.entries.length - 5) : ''}
     confirmLabel={ko.files.deleteConfirm}
     danger
     {busy}
@@ -223,8 +234,8 @@
 {:else if dialog?.kind === 'rename'}
   <Dialog
     title={ko.files.renameTitle}
-    names={[srcSel[0].Name]}
-    input={srcSel[0].Name}
+    names={[dialog.entries[0].Name]}
+    input={dialog.entries[0].Name}
     inputLabel={ko.files.renameLabel}
     confirmLabel={ko.files.change}
     {busy}

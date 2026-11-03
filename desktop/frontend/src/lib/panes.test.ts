@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canDrop, targetOf, type Pane } from './panes'
+import { canDrop, snapshotSelection, targetOf, type Pane } from './panes'
 import type { Entry } from './api'
 
 const pane = (over: Partial<Pane> = {}): Pane => ({ id: 'left', peer: 'local', share: 'docs', path: '', ...over })
@@ -49,5 +49,18 @@ describe('canDrop', () => {
   it('refuses when a pane has no share selected', () => {
     expect(canDrop(left, { ...right, share: '' })).toBe(false)
     expect(canDrop({ ...left, share: '' }, right)).toBe(false)
+  })
+})
+
+describe('snapshotSelection', () => {
+  it('copies the pane and the entries so later changes do not reach it', () => {
+    const p = pane({ path: 'a' })
+    const sel = [entry('x'), entry('y', 'dir')]
+    const snap = snapshotSelection(p, sel)
+    p.path = 'b'
+    p.share = 'other'
+    sel.length = 0
+    expect(snap.pane).toMatchObject({ peer: 'local', share: 'docs', path: 'a' })
+    expect(snap.entries.map((e) => e.Name)).toEqual(['x', 'y'])
   })
 })

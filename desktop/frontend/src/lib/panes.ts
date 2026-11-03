@@ -30,3 +30,8 @@ export function canDrop(src: Pane, dst: Pane): boolean {
   if (src.id === dst.id) return false
   return !(src.peer === dst.peer && src.share === dst.share && src.path === dst.path)
 }
+
+/** What a dialog acts on: the selection and the folder it was made in, frozen. */
+export function snapshotSelection(p: Pane, entries: Entry[]): { pane: Pane; entries: Entry[] } {
+  return { pane: { ...p }, entries: [...entries] }
+}
