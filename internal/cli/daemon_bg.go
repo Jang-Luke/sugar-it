@@ -104,12 +104,21 @@ func (e *env) startBackground(ctx context.Context, o daemonFlags) error {
 	defer lf.Close()
 	offset, _ := lf.Seek(0, io.SeekEnd)
 
-	cmd := exec.Command(exe, childArgs(dir, o)...)
-	cmd.Stdin = nil // the null device
-	cmd.Stdout, cmd.Stderr = lf, lf
-	detach(cmd)
+	newChild := func() *exec.Cmd {
+		c := exec.Command(exe, childArgs(dir, o)...)
+		c.Stdin = nil // the null device
+		c.Stdout, c.Stderr = lf, lf
+		return c
+	}
+	cmd := newChild()
+	detach(cmd, true)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start the daemon: %w", err)
+		// A job object can forbid breakaway on Windows; start inside it instead.
+		cmd = newChild()
+		detach(cmd, false)
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start the daemon: %w", err)
+		}
 	}
 	exited := make(chan struct{})
 	go func() { cmd.Wait(); close(exited) }()
