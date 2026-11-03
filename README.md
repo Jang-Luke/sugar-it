@@ -158,6 +158,18 @@ Verified on the Linux build host:
   run alone and in the second full run), cross-compilation for windows and darwin with
   `CGO_ENABLED=0`, and the two-host quickstart above.
 
+**Verified in CI**: `go test -race ./...` passes on `ubuntu-24.04`, `macos-14`
+and `windows-2022`, and the Linux desktop job builds the app.
+
+**Verified between Linux and Windows 11**, over a Tailscale network with real
+daemons: pairing in both directions, a 256 MiB copy with matching SHA-256, a
+Korean file name, a move where `a:b` and `CON` fail with `invalid_name` and a
+case-only twin fails with `conflict` while all three sources stay, a copy from
+Windows to Linux, and a 512 MiB copy resumed to a matching SHA-256 after the
+destination daemon was killed. `sugar-it mount` at the default `BasicAuthLevel`
+refuses with the administrator commands. The tests and e2e suite also pass on
+that Windows machine.
+
 **Verified packaging**: `goreleaser release --snapshot --clean` builds the six
 archives and the deb and rpm packages, and `checksums.txt` matches them.
 
@@ -166,20 +178,13 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
 - The docker `dpkg -i` install check has never been run. The amd64 deb was
   unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer
   scripts, and that binary prints its version. The rpm packages were built but
-  never unpacked or installed, and the macOS and Windows binaries were built
-  but never run.
+  never unpacked or installed, and the macOS binaries were built but never run.
 - Mounting on macOS and on Windows, and on Linux (the build host has no
   `gvfs-backends`).
 - The desktop app walk-through (no display on the build host). Its Go and
   front-end tests pass; the window has never been opened.
 - The release workflow has never run, so `wails build -platform
   darwin/universal` and the Windows NSIS build are untested.
-- macOS and Windows test results. The first CI run passed on Linux and failed
-  on `macos-14` and `windows-2022`. Those failures were then fixed from the logs
-  and from Go's source, on Linux, with the code only cross-compiled for those
-  OSes, so whether they pass now can only come from the next CI run. The
-  `desktop (linux)` job of that run failed while `wails build` downloaded a
-  module from proxy.golang.org.
 
 **Known limit on Windows**: a share folder cannot be renamed or deleted while
 the daemon has it open, because `os.Root` holds the directory without
