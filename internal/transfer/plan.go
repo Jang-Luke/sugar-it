@@ -87,7 +87,16 @@ type plan struct {
 	files    []planFile
 	dirs     []planDir
 	skipped  int
+	symlinks []string // those of the skipped that are symlinks, up to maxFailures
 	failures []ItemError
+}
+
+// skip counts an entry that is neither a file nor a directory.
+func (p *plan) skip(fullPath string, t vfs.EntryType) {
+	p.skipped++
+	if t == vfs.TypeSymlink && len(p.symlinks) < maxFailures {
+		p.symlinks = append(p.symlinks, fullPath)
+	}
 }
 
 type planFile struct {
@@ -115,7 +124,7 @@ func buildPlan(ctx context.Context, src vfs.FS, root string, e vfs.Entry) (*plan
 			return nil, err
 		}
 	default:
-		p.skipped++
+		p.skip(root, e.Type)
 	}
 	return p, nil
 }
@@ -151,7 +160,7 @@ func (p *plan) walk(ctx context.Context, src vfs.FS, root, rel string) error {
 			}
 			p.failures = append(p.failures, ItemError{path.Join(root, child), vfs.CodeOf(err), err.Error()})
 		default:
-			p.skipped++
+			p.skip(path.Join(root, child), e.Type)
 		}
 	}
 	return nil

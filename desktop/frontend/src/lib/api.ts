@@ -71,6 +71,7 @@ export interface Job {
   DoneBytes: number
   BytesPerSec: number
   Failures: ItemError[] | null
+  Skipped: ItemError[] | null
   Created: string
   Updated: string
 }

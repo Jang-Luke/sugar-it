@@ -2761,3 +2761,83 @@ func TestRecoveryAppliesRemoval(t *testing.T) {
 	r.wantFile(r.srcDir, "f", "data")
 	r.wantFile(r.srcDir, "g", "data")
 }
+
+// Spec 5 and 7: a symlink is recorded as skipped_symlink. It is not a failure.
+func TestSkippedSymlinkRecorded(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"tree/f": "data"})
+	if err := os.Symlink("f", filepath.Join(r.srcDir, "tree", "link")); err != nil {
+		t.Skip(err)
+	}
+	r.start()
+	id := r.submit(cpSpec("copy", "tree", "out"))
+	j := r.waitDone(id)
+	if j.State != StateDone || j.FailedFiles != 0 || j.SkippedFiles != 1 || len(j.Failures) != 0 {
+		t.Fatalf("job = %+v", j)
+	}
+	b, err := json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), SkippedSymlink) || !strings.Contains(string(b), "tree/link") {
+		t.Fatalf("the job does not say what it skipped: %s", b)
+	}
+}
+
+func TestSkippedSymlinkFields(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"tree/f": "data"})
+	if err := os.Symlink("f", filepath.Join(r.srcDir, "tree", "link")); err != nil {
+		t.Skip(err)
+	}
+	if err := os.Symlink("tree", filepath.Join(r.srcDir, "top")); err != nil {
+		t.Fatal(err)
+	}
+	r.start()
+	j := r.waitDone(r.submit(cpSpec("copy", "tree", "out")))
+	want := []ItemError{{"tree/link", SkippedSymlink, "symbolic links are not transferred"}}
+	if !slices.Equal(j.Skipped, want) {
+		t.Errorf("Skipped = %+v", j.Skipped)
+	}
+	j = r.waitDone(r.submit(cpSpec("copy", "top", "top")))
+	if j.State != StateDone || len(j.Skipped) != 1 || j.Skipped[0].Path != "top" {
+		t.Errorf("a link as the job's root: %+v", j)
+	}
+}
+
+func TestSkippedSymlinksCapped(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"tree/f": "data"})
+	const n = maxFailures + 5
+	for i := range n {
+		if err := os.Symlink("f", filepath.Join(r.srcDir, "tree", "l"+strconv.Itoa(i))); err != nil {
+			t.Skip(err)
+		}
+	}
+	r.start()
+	j := r.waitDone(r.submit(cpSpec("copy", "tree", "out")))
+	if j.State != StateDone || j.SkippedFiles != n || j.FailedFiles != 0 || len(j.Skipped) != maxFailures {
+		t.Errorf("state %s, skipped %d, failed %d, listed %d", j.State, j.SkippedFiles, j.FailedFiles, len(j.Skipped))
+	}
+}
+
+// A retry starts over, so it must not list what it skipped twice.
+func TestSkippedSymlinksNotDoubledByRetry(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"tree/f": "data"})
+	r.tree(r.dstDir, map[string]string{"out/tree/f": "in the way"})
+	if err := os.Symlink("f", filepath.Join(r.srcDir, "tree", "link")); err != nil {
+		t.Skip(err)
+	}
+	m := r.start()
+	first := r.submit(cpSpec("copy", "tree", "out"))
+	if j := waitState(t, m, first, StatePartial); len(j.Skipped) != 1 {
+		t.Fatalf("Skipped = %+v", j.Skipped)
+	}
+	if err := m.Retry(first); err != nil {
+		t.Fatal(err)
+	}
+	if j := waitState(t, m, first, StatePartial); len(j.Skipped) != 1 {
+		t.Fatalf("after a retry: Skipped = %+v", j.Skipped)
+	}
+}

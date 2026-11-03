@@ -19,7 +19,8 @@ const (
 	StateCanceled    State = "canceled"
 )
 
-// maxFailures caps Job.Failures; FailedFiles keeps counting past it.
+// maxFailures caps Job.Failures and Job.Skipped; FailedFiles and SkippedFiles
+// keep counting past it.
 const maxFailures = 1000
 
 func (s State) valid() bool {
@@ -53,6 +54,7 @@ type Job struct {
 	TotalBytes, DoneBytes, BytesPerSec               int64
 
 	Failures []ItemError // capped at maxFailures
+	Skipped  []ItemError // symlinks left out (skipped_symlink), capped at maxFailures; not failures
 
 	Created, Updated time.Time
 }
@@ -60,6 +62,7 @@ type Job struct {
 // clone returns a copy that shares nothing mutable with j.
 func (j Job) clone() Job {
 	j.Failures = slices.Clone(j.Failures)
+	j.Skipped = slices.Clone(j.Skipped)
 	if j.Error != nil {
 		e := *j.Error
 		j.Error = &e

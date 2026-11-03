@@ -38,7 +38,7 @@ const job = (over: Partial<Job> = {}): Job => ({
   Spec: { Op: 'copy', Src: { Peer: 'a', Share: 's', Path: 'x' }, Dst: { Peer: 'b', Share: 's', Path: '' }, OnConflict: 'fail' },
   State: 'running', Error: null,
   TotalFiles: 1, DoneFiles: 0, SkippedFiles: 0, FailedFiles: 0, TotalBytes: 0, DoneBytes: 0, BytesPerSec: 0,
-  Failures: null, Created: '', Updated: '', ...over,
+  Failures: null, Skipped: null, Created: '', Updated: '', ...over,
 })
 
 describe('progress helpers', () => {

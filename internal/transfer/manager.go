@@ -405,6 +405,7 @@ func resetCounters(js *jobState) {
 	js.DoneFiles, js.SkippedFiles, js.FailedFiles = 0, 0, 0
 	js.DoneBytes, js.BytesPerSec = 0, 0
 	js.Failures = nil
+	js.Skipped = nil
 }
 
 func (m *Manager) enqueueLocked(js *jobState) {
@@ -845,6 +846,9 @@ func (r *jobRun) applyPlanTotals(pl *plan) {
 	js := r.js
 	js.TotalFiles, js.TotalBytes = len(pl.files), 0
 	js.SkippedFiles = pl.skipped
+	for _, p := range pl.symlinks {
+		r.recordSymlinkLocked(p)
+	}
 	for _, f := range pl.files {
 		inPlan[f.rel] = true
 		js.TotalBytes += f.size
@@ -859,6 +863,12 @@ func (r *jobRun) applyPlanTotals(pl *plan) {
 	}
 	for _, f := range pl.failures {
 		r.recordLocked(f)
+	}
+}
+
+func (r *jobRun) recordSymlinkLocked(p string) {
+	if len(r.js.Skipped) < maxFailures {
+		r.js.Skipped = append(r.js.Skipped, ItemError{p, SkippedSymlink, "symbolic links are not transferred"})
 	}
 }
 
@@ -1165,6 +1175,9 @@ func (r *jobRun) fetch(f planFile, srcP, dstP, key string) error {
 		if err == nil {
 			js.SkippedFiles++
 			js.TotalBytes -= f.size
+			if res.SkipReason == SkippedSymlink { // it became one after the walk
+				r.recordSymlinkLocked(srcP)
+			}
 		}
 		m.mu.Unlock()
 		if err != nil {

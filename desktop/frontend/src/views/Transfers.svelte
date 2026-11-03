@@ -89,7 +89,7 @@
         <span>{formatBytes(j.DoneBytes)} / {formatBytes(j.TotalBytes)}</span>
         {#if isActive(j) && j.BytesPerSec > 0}<span>{formatBytes(j.BytesPerSec)}{ko.transfers.perSec}</span>{/if}
         <span>{ko.transfers.files(j.DoneFiles, j.TotalFiles)}</span>
-        {#if j.SkippedFiles > 0}<span>{ko.transfers.skipped(j.SkippedFiles)}</span>{/if}
+        {#if j.SkippedFiles > 0}<span title={(j.Skipped ?? []).map((s) => s.Path).join('\n')}>{ko.transfers.skipped(j.SkippedFiles)}</span>{/if}
         {#if failedCount(j) > 0}<span class="error">{ko.transfers.failureCount(failedCount(j))}</span>{/if}
         <span>{ko.transfers.conflict(conflictLabel(j))}</span>
       </div>

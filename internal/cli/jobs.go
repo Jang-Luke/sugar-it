@@ -178,6 +178,9 @@ func (e *env) jobsCmd() *cobra.Command {
 				for _, f := range j.Failures {
 					fmt.Fprintf(e.stdout, "failed: %s\n", itemText(f))
 				}
+				for _, f := range j.Skipped {
+					fmt.Fprintf(e.stdout, "skipped: %s\n", itemText(f))
+				}
 				return nil
 			}),
 		},
