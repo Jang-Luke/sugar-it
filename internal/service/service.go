@@ -40,6 +40,9 @@ type Unit struct {
 // user's home directory, configDir the --config-dir to pass ("" for the default).
 // daemon is always the first argument: that is how the desktop binary, which
 // the service runs when there is no sugar-it beside it, knows to start no window.
+// systemd and launchd supervise the process they start, so on Linux and macOS
+// it is `daemon --foreground`. The Windows Run key value is plain `daemon`,
+// which detaches, so that sugar-it.exe leaves no console window open.
 func Plan(goos, exe, home, configDir string) (Unit, error) {
 	if exe == "" {
 		return Unit{}, errors.New("no executable path")
@@ -47,7 +50,7 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 	switch goos {
 	case "linux":
 		p := path.Join(home, ".config", "systemd", "user", unitName)
-		args := `"` + systemdEscape(exe) + `" daemon`
+		args := `"` + systemdEscape(exe) + `" daemon --foreground`
 		if configDir != "" {
 			args += ` --config-dir "` + systemdEscape(configDir) + `"`
 		}
@@ -61,7 +64,7 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 		}}, nil
 	case "darwin":
 		p := darwinPath(home)
-		argv := []string{exe, "daemon"}
+		argv := []string{exe, "daemon", "--foreground"}
 		if configDir != "" {
 			argv = append(argv, "--config-dir", configDir)
 		}

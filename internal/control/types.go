@@ -123,3 +123,6 @@ func readRuntime(dir string) (Runtime, error) {
 	}
 	return rt, nil
 }
+
+// ReadRuntime returns the runtime.json of dir, or an error if there is none.
+func ReadRuntime(dir string) (Runtime, error) { return readRuntime(dir) }

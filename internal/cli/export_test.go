@@ -12,3 +12,11 @@ import (
 func ExecuteWithRunners(args []string, stdout, stderr io.Writer, m mount.Runner, s service.Runner) int {
 	return execute(&env{stdout: stdout, stderr: stderr, mountRunner: m, svcRunner: s}, args)
 }
+
+// RotateLog is rotateLog for tests.
+var RotateLog = rotateLog
+
+// ChildArgs is the command line the background start gives the detached daemon.
+func ChildArgs(configDir, listen, control, dav string, advertise []string) []string {
+	return childArgs(configDir, daemonFlags{listen: listen, control: control, dav: dav, advertise: advertise})
+}

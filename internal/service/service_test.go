@@ -22,7 +22,7 @@ func TestLinuxUnit(t *testing.T) {
 	if u.Path != "/home/ann/.config/systemd/user/sugar-it.service" {
 		t.Fatalf("path %q", u.Path)
 	}
-	if !strings.Contains(u.Content, `ExecStart="/usr/local/bin/sugar-it" daemon`) {
+	if !strings.Contains(u.Content, `ExecStart="/usr/local/bin/sugar-it" daemon --foreground`) {
 		t.Fatalf("content:\n%s", u.Content)
 	}
 	if !strings.Contains(u.Content, "WantedBy=default.target") {
@@ -32,7 +32,7 @@ func TestLinuxUnit(t *testing.T) {
 		t.Fatalf("commands %v", u.Commands)
 	}
 	u, _ = service.Plan("linux", "/x/sugar-it", "/home/ann", "/home/ann/cfg dir")
-	if !strings.Contains(u.Content, `ExecStart="/x/sugar-it" daemon --config-dir "/home/ann/cfg dir"`) {
+	if !strings.Contains(u.Content, `ExecStart="/x/sugar-it" daemon --foreground --config-dir "/home/ann/cfg dir"`) {
 		t.Fatalf("config dir missing:\n%s", u.Content)
 	}
 }
@@ -62,7 +62,7 @@ func TestDarwinUnit(t *testing.T) {
 		}
 	}
 	joined := strings.Join(strs, "|")
-	if !strings.Contains(joined, "/Applications/Sugar It/sugar-it|daemon") {
+	if !strings.Contains(joined, "/Applications/Sugar It/sugar-it|daemon|--foreground") {
 		t.Fatalf("program arguments missing: %s", joined)
 	}
 	if len(u.Commands) == 0 || u.Commands[0][0] != "launchctl" {
@@ -333,13 +333,14 @@ func hasAdjacent(c []string, words ...string) bool {
 	return i == len(words)
 }
 
-// The desktop binary only leaves GUI mode when daemon is its first argument.
+// systemd and launchd need a foreground process; the Windows Run key value
+// starts the detaching form so no console stays. The desktop binary only leaves GUI mode when daemon is its first argument.
 func TestDaemonIsTheFirstArgument(t *testing.T) {
 	u, err := service.Plan("darwin", "/a/sugar-it", "/Users/ann", "/cfg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`<string>/a/sugar-it</string>\s*<string>daemon</string>\s*<string>--config-dir</string>\s*<string>/cfg</string>`).MatchString(u.Content) {
+	if !regexp.MustCompile(`<string>/a/sugar-it</string>\s*<string>daemon</string>\s*<string>--foreground</string>\s*<string>--config-dir</string>\s*<string>/cfg</string>`).MatchString(u.Content) {
 		t.Errorf("darwin arguments:\n%s", u.Content)
 	}
 	u, err = service.Plan("windows", `C:\a\sugar-it.exe`, `C:\Users\ann`, `C:\cfg`)

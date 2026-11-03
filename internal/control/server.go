@@ -35,6 +35,8 @@ type Deps struct {
 	Jobs      *transfer.Manager
 	Token     string
 	InProcess bool
+	// Shutdown asks the host to stop; it returns at once. Nil: not supported.
+	Shutdown func()
 }
 
 type server struct{ Deps }
@@ -47,6 +49,7 @@ func NewServer(d Deps) *http.Server {
 	s := &server{d}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.status)
+	mux.HandleFunc("POST /v1/shutdown", s.shutdown)
 	mux.HandleFunc("POST /v1/invite", s.invite)
 	mux.HandleFunc("POST /v1/peers/join", s.join)
 	mux.HandleFunc("POST /v1/peers/remove", s.removePeer)
@@ -177,6 +180,17 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		peers = []node.PeerStatus{}
 	}
 	writeJSON(w, 200, Status{ID: s.Node.ID(), Name: s.Node.Name(), Peers: peers, Version: Version, InProcess: s.InProcess})
+}
+
+// shutdown replies first, then stops the daemon: the reply must not wait for
+// the server that sends it. A daemon hosted by the desktop app is the app's.
+func (s *server) shutdown(w http.ResponseWriter, r *http.Request) {
+	if s.InProcess || s.Deps.Shutdown == nil {
+		writeErr(w, vfs.E(vfs.CodeInvalidRequest, "this daemon runs inside the sugar-it desktop app; close the app to stop it"))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+	s.Deps.Shutdown()
 }
 
 func (s *server) invite(w http.ResponseWriter, r *http.Request) {

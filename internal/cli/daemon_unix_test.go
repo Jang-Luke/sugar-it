@@ -21,7 +21,7 @@ func TestDaemonCommand(t *testing.T) {
 	done := make(chan int, 1)
 	var out, errb bytes.Buffer
 	go func() {
-		done <- cli.Execute([]string{"--config-dir", h.dir, "daemon", "--advertise", adv,
+		done <- cli.Execute([]string{"--config-dir", h.dir, "daemon", "--foreground", "--advertise", adv,
 			"--listen", h.peer, "--control", freeAddr(t), "--dav", freeAddr(t)}, &out, &errb)
 	}()
 	deadline := time.Now().Add(10 * time.Second)
@@ -36,7 +36,7 @@ func TestDaemonCommand(t *testing.T) {
 	}
 	// A second daemon on the same config dir is refused.
 	var o2, e2 bytes.Buffer
-	if code := cli.Execute([]string{"--config-dir", h.dir, "daemon", "--advertise", "10.9.9.9:1", "--control", freeAddr(t),
+	if code := cli.Execute([]string{"--config-dir", h.dir, "daemon", "--foreground", "--advertise", "10.9.9.9:1", "--control", freeAddr(t),
 		"--listen", freeAddr(t), "--dav", freeAddr(t)}, &o2, &e2); code != 1 || !strings.Contains(e2.String(), "already running") {
 		t.Errorf("second daemon: exit %d stderr %q", code, e2.String())
 	}
@@ -59,13 +59,4 @@ func TestDaemonCommand(t *testing.T) {
 	if got := cfg.Get().AdvertiseAddrs; len(got) != 1 || got[0] != adv {
 		t.Fatalf("advertise not persisted: %v", got)
 	}
-}
-
-func mustCfg(t *testing.T, dir string) *config.Store {
-	t.Helper()
-	c, err := config.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c
 }

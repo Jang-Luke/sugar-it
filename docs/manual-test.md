@@ -4,7 +4,9 @@
 plan (`internal/mount`) and the WebDAV server (`e2e`, `internal/davfs`). The
 real mount needs a desktop session, which CI and the build host do not have.
 
-Setup on every OS: start a daemon (`sugar-it daemon`), add a share
+Setup on every OS: start a daemon (`sugar-it daemon` returns once it runs in the
+background; `sugar-it stop` ends it; its output is in `daemon.log` in the config
+directory), add a share
 (`sugar-it share add docs <folder>`), and pair at least one other host so a
 peer folder exists. The WebDAV user is `sugar-it`; the password is the control
 token, which `sugar-it mount` prints when the OS asks for it.
@@ -103,7 +105,7 @@ Use two config directories so one machine acts as two hosts. Host A is the app,
 host B a plain daemon on other ports:
 
 ```
-sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --dav 127.0.0.1:8445 --advertise 127.0.0.1:8443 &
+sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --dav 127.0.0.1:8445 --advertise 127.0.0.1:8443
 ./desktop/build/bin/sugar-it-desktop --config-dir /tmp/a
 ```
 
@@ -200,3 +202,25 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     "새로 고침". Items are greyed out when the matching toolbar button is.
     The menu closes on a click outside it, Escape and scrolling the list, and
     stays inside the window when opened near the right or bottom edge.
+
+## Background daemon (`sugar-it daemon`)
+
+Linux was run by hand with a temporary config directory (start, `status`, a
+second start refused, `stop`, `stop` again). The rest has not been run.
+
+1. `sugar-it --config-dir /tmp/c daemon`: returns within a few seconds with one
+   line (addresses, log path, how to stop); `status` works from a new terminal;
+   close the starting terminal and `status` still works.
+2. `daemon.log` exists with mode 0600 and holds "daemon running". A second
+   `daemon` on the same directory exits 1 and leaves the first running.
+3. Start with a busy `--control` port: exit 1 and the end of the log on stderr.
+4. `sugar-it --config-dir /tmp/c stop` prints "stopped"; `status` then exits 1,
+   the ports are free and `runtime.json` is gone. `stop` again exits 1.
+5. With the desktop app running its own daemon, `sugar-it stop` says to close
+   the app.
+6. Windows: `sugar-it.exe daemon` from a console returns and leaves no console
+   window for the daemon; `Get-Process sugar-it` shows it; `stop` ends it. The
+   same with `sugar-it-desktop.exe daemon` started from Explorer or the Run key
+   (a GUI-subsystem parent). After `service install` and a logon, see whether a
+   console window flashes for `sugar-it.exe`. Not yet run on Windows.
+7. macOS: the same as Linux; the LaunchAgent uses `daemon --foreground`.

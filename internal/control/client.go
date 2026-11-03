@@ -125,6 +125,13 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return out, err
 }
 
+// Shutdown asks the daemon to stop. It returns once the request is accepted,
+// not once the daemon has stopped. A daemon hosted by the desktop app refuses
+// with invalid_request.
+func (c *Client) Shutdown(ctx context.Context) error {
+	return c.do(ctx, "POST", "/v1/shutdown", nil, nil, nil)
+}
+
 // Invite makes an invitation valid for ttl (0 means the default, 10 minutes).
 func (c *Client) Invite(ctx context.Context, ttl time.Duration) (string, error) {
 	var out inviteResp

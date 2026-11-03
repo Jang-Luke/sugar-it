@@ -603,3 +603,91 @@ func TestRemoteJobCancelAndRetry(t *testing.T) {
 	waitState(t, a.c, lj.Host, lj.ID, transfer.StateDone)
 	wantCode(t, a.c.CancelJob(bg, lj.Host, lj.ID), vfs.CodeInvalidRequest) // already finished
 }
+
+// ---- shutdown ----
+
+func rawPost(t *testing.T, addr, host, token, path string) int {
+	t.Helper()
+	req, err := http.NewRequest("POST", "http://"+addr+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "" {
+		req.Host = host
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestShutdownNeedsTokenAndLoopbackHost(t *testing.T) {
+	h := newHost(t, "a")
+	addr, token := h.d.ControlAddr(), h.c.Token()
+	if code := rawPost(t, addr, "", "", "/v1/shutdown"); code != 401 {
+		t.Errorf("unauthenticated shutdown: %d", code)
+	}
+	if code := rawPost(t, addr, "", "wrong", "/v1/shutdown"); code != 401 {
+		t.Errorf("wrong token shutdown: %d", code)
+	}
+	if code := rawPost(t, addr, "evil.example", token, "/v1/shutdown"); code != 403 {
+		t.Errorf("foreign host shutdown: %d", code)
+	}
+	if _, err := h.c.Status(bg); err != nil {
+		t.Fatalf("daemon stopped by refused requests: %v", err)
+	}
+}
+
+func TestShutdownStopsTheDaemon(t *testing.T) {
+	h := newHost(t, "a")
+	if err := h.c.Shutdown(bg); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- h.d.Wait() }()
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("Wait after a requested shutdown: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+	if _, err := control.Discover(h.dir); !errors.Is(err, control.ErrUnavailable) {
+		t.Fatalf("Discover after shutdown: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, control.RuntimeFile)); !os.IsNotExist(err) {
+		t.Fatalf("runtime.json after shutdown: %v", err)
+	}
+}
+
+func TestShutdownRefusedInProcess(t *testing.T) {
+	dir := t.TempDir()
+	d, err := daemon.Start(bg, daemon.Options{ConfigDir: dir, InProcess: true,
+		ListenAddr: "127.0.0.1:0", ControlAddr: "127.0.0.1:0", DAVAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(bg, 10*time.Second)
+		defer cancel()
+		d.Shutdown(ctx)
+	}()
+	c, err := control.Discover(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Shutdown(bg)
+	wantCode(t, err, vfs.CodeInvalidRequest)
+	if err != nil && !strings.Contains(err.Error(), "close the app") {
+		t.Errorf("message does not say to close the app: %v", err)
+	}
+	if _, err := c.Status(bg); err != nil {
+		t.Fatalf("in-process daemon stopped: %v", err)
+	}
+}

@@ -120,7 +120,7 @@ func (n *node) start() error {
 	n.mu.Lock()
 	n.stderr.Reset()
 	n.mu.Unlock()
-	n.cmd = exec.Command(binary, "--config-dir", n.dir, "daemon",
+	n.cmd = exec.Command(binary, "--config-dir", n.dir, "daemon", "--foreground",
 		"--listen", n.peer, "--control", n.ctl, "--dav", n.dav, "--advertise", n.peer)
 	n.cmd.Stderr = n
 	if err := n.cmd.Start(); err != nil {

@@ -27,7 +27,7 @@ Tagged releases are meant to provide the following. The first two items are buil
 - `sugar-it-desktop` (Wails GUI, not part of GoReleaser or `checksums.txt`): a Linux binary, a macOS universal `.app`
   (zipped) and a Windows NSIS installer. These packages do not contain the
   `sugar-it` command. The app's service button runs the app's own binary as the
-  daemon (`sugar-it-desktop daemon`, no window), or a `sugar-it` beside it.
+  daemon (`sugar-it-desktop daemon`, no window; it detaches like `sugar-it daemon`), or a `sugar-it` beside it.
 
 Build the desktop app yourself (Linux needs `libgtk-3-dev` and
 `libwebkit2gtk-4.1-dev`; the frontend must be built first because `main.go`
@@ -68,7 +68,7 @@ Host A shares `~/docs`; host B pairs with A and copies a file.
 On host A:
 
 ```
-sugar-it daemon                       # leave running; or: sugar-it service install
+sugar-it daemon                       # starts in the background and returns; or: sugar-it service install
 sugar-it peer rename alpha            # name this host (lowercase letters, digits, -)
 sugar-it share add docs ~/docs
 sugar-it invite                       # prints sugar-it1:... (valid 10 minutes)
@@ -90,8 +90,22 @@ sugar-it jobs --help                  # follow and control transfers
 ```
 
 Paths are `<peer>:<share>/<path>`; `local` always means this host. Other
-commands: `status`, `mkdir`, `rename`, `rm`, `peer remove`, `mount`, `unmount`,
-`service install`. Every command has `--help`.
+commands: `status`, `stop`, `mkdir`, `rename`, `rm`, `peer remove`, `mount`,
+`unmount`, `service install`. Every command has `--help`.
+
+`sugar-it daemon` detaches: it starts the daemon in the background, waits until
+it answers (up to 15 seconds), prints its addresses and the log path, and
+returns. The daemon's output goes to `daemon.log` in the config directory
+(mode 0600, appended on every start, moved to `daemon.log.1` when it is over
+10 MiB at the next start). If the daemon fails to start, the command prints the
+end of the log and exits 1. `sugar-it stop` stops it gracefully through the
+Control API and waits until it is gone. `sugar-it daemon --foreground` keeps the
+old behaviour (runs in the terminal until Ctrl-C or SIGTERM); the systemd and
+launchd units use it. A daemon hosted by the desktop app cannot be stopped with
+`stop`: close the app.
+
+A daemon started before this change runs in a terminal and has no `stop`
+endpoint: stop it with Ctrl-C (or restart it once), then start the new one.
 
 Run on two local daemons on Linux, the sequence above printed `paired with
 alpha`, then the share listing, then
@@ -188,6 +202,11 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   `BasicAuthLevel` 2: it connected a chosen and an automatic drive, then listed,
   read, wrote and deleted, and disconnected. The `\\127.0.0.1@port\DavWWWRoot`
   form is what that run used.
+- The background start (`sugar-it daemon` without `--foreground`) on Windows and
+  macOS: the Windows flags (`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS |
+  CREATE_NO_WINDOW`), a start from the GUI-subsystem `sugar-it-desktop.exe`, and
+  whether `sugar-it.exe` still flashes a console at logon are not verified. It
+  was run on Linux only.
 - `sugar-it service install` on Windows actually starting the daemon at logon.
   The Run key value was written with correct quoting and removed again, from an
   administrator session. A non-administrator has not been tried.

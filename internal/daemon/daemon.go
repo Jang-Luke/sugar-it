@@ -28,8 +28,8 @@ import (
 )
 
 const (
-	partMaxAge   = 7 * 24 * time.Hour
-	defaultGrace = 10 * time.Second // how long Shutdown lets open requests finish
+	partMaxAge = 7 * 24 * time.Hour
+	Grace      = 10 * time.Second // how long Shutdown lets open requests finish
 )
 
 // Options configures Start. An empty address means the configured one.
@@ -200,7 +200,8 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 	d.n.AttachJobs(d.jobs) // before the peer listener accepts
 	d.collectParts(cfg.Shares)
 
-	d.srvs[0] = control.NewServer(control.Deps{Node: d.n, Jobs: d.jobs, Token: token, InProcess: o.InProcess})
+	d.srvs[0] = control.NewServer(control.Deps{Node: d.n, Jobs: d.jobs, Token: token, InProcess: o.InProcess,
+		Shutdown: func() { go d.Shutdown(context.Background()) }})
 	d.srvs[1] = peerapi.NewServer(id, d.n.Backend())
 	d.srvs[2] = &http.Server{Handler: davHandler(d.n, token), ReadHeaderTimeout: 10 * time.Second}
 
@@ -300,6 +301,9 @@ func (d *Daemon) Node() *node.Node { return d.n }
 // is shutting itself down by then; Wait returns once that has finished.
 func (d *Daemon) Failed() <-chan error { return d.failed }
 
+// Done is closed once the daemon has stopped, for whatever reason.
+func (d *Daemon) Done() <-chan struct{} { return d.stopped }
+
 // Wait blocks until the daemon has stopped, whether by Shutdown, by its
 // context, or because a listener failed, and returns that failure if any.
 func (d *Daemon) Wait() error {
@@ -323,7 +327,7 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		gctx := ctx
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
-			gctx, cancel = context.WithTimeout(ctx, defaultGrace)
+			gctx, cancel = context.WithTimeout(ctx, Grace)
 			defer cancel()
 		}
 		var sw sync.WaitGroup

@@ -163,47 +163,59 @@ func newRoot(e *env) *cobra.Command {
 	root.PersistentFlags().BoolVar(&e.json, "json", false, "print JSON (query commands)")
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr(err) })
-	root.AddCommand(e.daemonCmd(), e.statusCmd(), e.inviteCmd(), e.peerCmd(), e.shareCmd(),
+	root.AddCommand(e.daemonCmd(), e.stopCmd(), e.statusCmd(), e.inviteCmd(), e.peerCmd(), e.shareCmd(),
 		e.lsCmd(), e.cpCmd("cp", "copy"), e.cpCmd("mv", "move"), e.rmCmd(), e.mkdirCmd(), e.renameCmd(), e.jobsCmd(), e.mountCmd(), e.unmountCmd(), e.serviceCmd())
 	return root
 }
 
 func (e *env) daemonCmd() *cobra.Command {
-	var listen, ctl, dav string
-	var advertise []string
+	var o daemonFlags
 	cmd := &cobra.Command{
 		Use:   "daemon",
-		Short: "Run the sugar-it daemon in the foreground",
-		Args:  cobra.NoArgs,
+		Short: "Run the sugar-it daemon in the background (--foreground: in this terminal)",
+		Long: "Run the sugar-it daemon detached from this terminal; the command returns once it answers.\n" +
+			"Its output goes to daemon.log in the config directory; stop it with `sugar-it stop`.\n" +
+			"With --foreground the daemon runs in this process until Ctrl-C or SIGTERM,\n" +
+			"which is what systemd and launchd want.",
+		Args: cobra.NoArgs,
 		RunE: plain(func(cmd *cobra.Command, _ []string) error {
-			// Execute's context ends on SIGINT and SIGTERM.
-			ctx := cmd.Context()
-			d, err := daemon.Start(ctx, daemon.Options{ConfigDir: e.configDir, ListenAddr: listen, ControlAddr: ctl, DAVAddr: dav, AdvertiseAddrs: advertise})
-			if err != nil {
-				return err
+			if !o.foreground {
+				return e.startBackground(cmd.Context(), o)
 			}
-			fmt.Fprintf(e.stderr, "sugar-it daemon running: peer %s, control %s, webdav %s\n", d.PeerAddr(), d.ControlAddr(), d.DAVAddr())
-			var failure error
-			select {
-			case <-ctx.Done():
-			case failure = <-d.Failed():
-			}
-			sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if err := d.Shutdown(sctx); err != nil {
-				return err
-			}
-			if err := d.Wait(); err != nil {
-				return err
-			}
-			return failure
+			return e.runForeground(cmd.Context(), o)
 		}),
 	}
-	cmd.Flags().StringVar(&listen, "listen", "", "Peer API address (default: configured, :7443)")
-	cmd.Flags().StringVar(&ctl, "control", "", "Control API address (default: configured, 127.0.0.1:7444)")
-	cmd.Flags().StringVar(&dav, "dav", "", "WebDAV address (default: configured, 127.0.0.1:7445)")
-	cmd.Flags().StringArrayVar(&advertise, "advertise", nil, "address other hosts should dial, host:port (repeatable; saved in the config)")
+	cmd.Flags().BoolVar(&o.foreground, "foreground", false, "run in this process instead of detaching")
+	cmd.Flags().StringVar(&o.listen, "listen", "", "Peer API address (default: configured, :7443)")
+	cmd.Flags().StringVar(&o.control, "control", "", "Control API address (default: configured, 127.0.0.1:7444)")
+	cmd.Flags().StringVar(&o.dav, "dav", "", "WebDAV address (default: configured, 127.0.0.1:7445)")
+	cmd.Flags().StringArrayVar(&o.advertise, "advertise", nil, "address other hosts should dial, host:port (repeatable; saved in the config)")
 	return cmd
+}
+
+// runForeground is the daemon in this process. ctx ends on SIGINT and SIGTERM;
+// the daemon also ends when a listener fails or `sugar-it stop` asks it to.
+func (e *env) runForeground(ctx context.Context, o daemonFlags) error {
+	d, err := daemon.Start(ctx, daemon.Options{ConfigDir: e.configDir, ListenAddr: o.listen, ControlAddr: o.control, DAVAddr: o.dav, AdvertiseAddrs: o.advertise})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(e.stderr, "sugar-it daemon running: peer %s, control %s, webdav %s\n", d.PeerAddr(), d.ControlAddr(), d.DAVAddr())
+	var failure error
+	select {
+	case <-ctx.Done():
+	case <-d.Done():
+	case failure = <-d.Failed():
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), daemon.Grace+5*time.Second)
+	defer cancel()
+	if err := d.Shutdown(sctx); err != nil {
+		return err
+	}
+	if err := d.Wait(); err != nil {
+		return err
+	}
+	return failure
 }
 
 // group is the body of a command that only holds subcommands: an unknown word

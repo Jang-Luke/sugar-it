@@ -380,7 +380,7 @@ func TestInstallServicePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Content, `"`+cli+`" daemon --config-dir "`+dir+`"`) {
+	if !strings.Contains(got.Content, `"`+cli+`" daemon --foreground --config-dir "`+dir+`"`) {
 		t.Errorf("unit does not run the CLI daemon on this config dir:\n%s", got.Content)
 	}
 	if !strings.Contains(res.Output, "installed") {
@@ -414,7 +414,7 @@ func TestInstallServiceTargetsThisProgramWithoutCLIBeside(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `"` + self + `" daemon --config-dir "` + dir + `"`
+	want := `"` + self + `" daemon --foreground --config-dir "` + dir + `"`
 	if !strings.Contains(got.Content, want) {
 		t.Errorf("unit does not run %s:\n%s", want, got.Content)
 	}
@@ -425,6 +425,13 @@ func TestDaemonArgumentRunsTheCLI(t *testing.T) {
 	code, handled := runDaemon([]string{"daemon", "--help"}, &out, &errb)
 	if !handled || code != 0 || !strings.Contains(out.String(), "Run the sugar-it daemon") {
 		t.Errorf("handled %v, code %d, stdout %q, stderr %q", handled, code, out.String(), errb.String())
+	}
+	// The detached child of a background start is this program with these
+	// arguments; they must reach the CLI too, not open the window.
+	out.Reset()
+	code, handled = runDaemon([]string{"daemon", "--foreground", "--config-dir", "x", "--help"}, &out, &errb)
+	if !handled || code != 0 || !strings.Contains(out.String(), "--foreground") {
+		t.Errorf("daemon --foreground: handled %v, code %d, stdout %q", handled, code, out.String())
 	}
 	for _, args := range [][]string{nil, {"--config-dir", "x"}, {"--config-dir", "daemon"}} {
 		if _, handled := runDaemon(args, &out, &errb); handled {

@@ -17,7 +17,8 @@
 ## 2. 아키텍처
 
 - **`sugar-it` (CLI + 데몬):** `CGO_ENABLED=0` 단일 바이너리. 헤드리스 서버에서도 동작한다.
-- **`sugar-it-desktop`:** Wails 앱. 로컬 데몬의 제어 API를 호출하는 얇은 클라이언트이며, 데몬이 없으면 프로세스 안에서 띄운다. 이때 창을 닫으면 공유가 멈춘다는 것을 UI에 표시한다. 첫 인수가 `daemon`이면 창을 띄우지 않고(GTK를 시작하지 않는다) CLI와 똑같이 데몬으로 실행한다.
+- **`sugar-it-desktop`:** Wails 앱. 로컬 데몬의 제어 API를 호출하는 얇은 클라이언트이며, 데몬이 없으면 프로세스 안에서 띄운다. 이때 창을 닫으면 공유가 멈춘다는 것을 UI에 표시한다. 첫 인수가 `daemon`이면 창을 띄우지 않고(GTK를 시작하지 않는다) CLI와 똑같이 데몬으로 실행한다. 백그라운드 시작이 자기 자신을 `daemon --foreground`로 다시 실행할 때도 이 경로(`runDaemon`)를 거친다.
+- **데몬 실행 방식:** `sugar-it daemon`은 기본적으로 백그라운드로 뜬다. 부모가 `os.Executable()`을 같은 플래그(`--config-dir`, `--listen`, `--control`, `--dav`, `--advertise`)와 `daemon --foreground`로 다시 실행한다. 자식의 stdin은 널 장치이고 stdout과 stderr는 `<설정 경로>/daemon.log`(0600, 추가 기록)로 간다. Unix는 `Setsid`, Windows는 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW`(빌드 태그 파일, CGO 없음)로 터미널과 콘솔에서 분리한다. 부모는 `runtime.json`의 실제 주소로 Control API가 응답할 때까지 최대 15초 기다린 뒤 주소, 로그 경로, 종료 방법을 한 줄로 출력하고 0으로 끝난다. 자식이 먼저 죽거나 시간이 지나면 `daemon.log` 끝부분을 stderr에 출력하고 1로 끝나며, 시간 초과 때는 자식을 남겨 두지 않는다. 이미 실행 중이면 잠금 때문에 오류로 끝나고 아무것도 바꾸지 않는다. 제어 토큰은 출력하거나 기록하지 않는다. `daemon.log`는 시작할 때마다 이어 쓰고, 시작 시 10 MiB를 넘으면 `daemon.log.1`로 바꾼다(기존 것은 덮어쓴다). `--foreground`는 현재 프로세스에서 SIGINT와 SIGTERM으로 정상 종료하는 예전 동작이다. Windows의 동작은 아직 검증하지 않았다.
 - **데몬의 리스너 3개**
 
 | 리스너 | 기본 주소 | 인증 | 용도 |
@@ -138,7 +139,7 @@ Control API와 WebDAV는 루프백 주소에서만 연다. 설정이나 옵션�
 ## 9. CLI
 
 ```
-sugar-it daemon | status
+sugar-it daemon [--foreground] | status | stop
 sugar-it invite [--ttl 10m]
 sugar-it peer add <invite> | list | remove <name> | rename <new-name>   # rename은 이 호스트의 이름을 바꾼다
 sugar-it share add <name> <path> [--read-only] | list | remove <name>
@@ -149,6 +150,8 @@ sugar-it jobs list | show <id> | cancel <id> | retry <id> | watch [<id>]
 sugar-it mount [--drive Z:] | unmount
 sugar-it service install | uninstall
 ```
+
+`sugar-it stop`은 인증된 `POST /v1/shutdown`(다른 엔드포인트와 같은 토큰과 루프백 Host 검사)으로 데몬을 정상 종료하고, 데몬의 종료 유예 시간 안에 Control API가 응답하지 않을 때까지 기다린 뒤 `stopped`를 출력한다. 실행 중인 데몬이 없으면 그렇게 알리고 1로 끝난다. 데스크톱 앱이 프로세스 안에서 띄운 데몬은 `invalid_request`로 거절하며 앱을 닫으라고 안내한다. `--foreground` 데몬은 종료 요청을 받으면 `runtime.json`을 지우고 정상적으로 반환한다.
 
 대상 표기는 `peer:share/path`이고 로컬은 `local:share/path`이다. 모든 조회 명령은 `--json`을 지원한다. 종료 코드는 성공 0, `partial` 또는 `failed` 작업 1, 사용 오류 2다.
 
@@ -168,8 +171,9 @@ sugar-it service install | uninstall
 - `sugar-it`: GoReleaser로 3개 OS × 2개 아키텍처 아카이브와 `.deb`, `.rpm`을 만든다.
 - `sugar-it-desktop`: OS별 러너에서 `wails build`로 macOS `.app`, Windows NSIS 설치 파일, Linux 바이너리를 만든다.
 - `sugar-it service install`
+  - systemd와 launchd는 포그라운드 프로세스가 필요하므로 Linux와 macOS 유닛은 `daemon --foreground`를 실행한다.
   - Linux: `systemd --user` 유닛과 `loginctl enable-linger`
   - macOS: LaunchAgent
-  - Windows: 사용자 Run 레지스트리 값(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 `sugar-it`, `reg add`/`reg delete`). 예약 작업(`schtasks /SC ONLOGON`)은 관리자 권한이 필요해 쓰지 않는다. 설치해도 데몬을 바로 시작하지 않고 다음 로그인부터 실행된다. 이미 지워진 값을 제거하는 것은 오류가 아니다. 콘솔 프로그램인 `sugar-it.exe`를 등록하면 로그인 때 콘솔 창이 뜨고, GUI 프로그램인 `sugar-it-desktop.exe`는 뜨지 않는다.
+  - Windows: 사용자 Run 레지스트리 값(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 `sugar-it`, `reg add`/`reg delete`). 예약 작업(`schtasks /SC ONLOGON`)은 관리자 권한이 필요해 쓰지 않는다. 설치해도 데몬을 바로 시작하지 않고 다음 로그인부터 실행된다. 이미 지워진 값을 제거하는 것은 오류가 아니다. Run 키 값은 `daemon`(분리 실행)을 쓰므로 `sugar-it.exe`도 콘솔을 남기지 않는다(부모가 잠깐 콘솔을 띄울 수 있는지는 미검증). `sugar-it-desktop.exe daemon`도 같은 경로로 동작해야 하며, GUI 하위 시스템 부모에서의 실행은 아직 검증하지 않았다.
   - 사용자의 파일과 설정에 접근하도록 모두 사용자 권한으로 실행한다.
 - GUI의 서비스 설치는 앱 옆에 `sugar-it`가 있으면 그것을, 없으면 `sugar-it-desktop daemon`을 실행하도록 등록한다. 데스크톱 패키지에는 CLI가 없고 Finder에서 띄운 앱에는 사용자의 `PATH`가 없으므로 `PATH`는 찾지 않는다.
