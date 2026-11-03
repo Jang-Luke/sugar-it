@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -96,7 +97,11 @@ func TestFetchCopiesAndPreservesMtime(t *testing.T) {
 		t.Fatalf("content/progress wrong: %d", got)
 	}
 	fi, _ := os.Stat(filepath.Join(e.dstDir, "b.txt"))
-	if !fi.ModTime().Equal(mt) || fi.Mode().Perm() != 0o640 {
+	want, wantMode := mt, os.FileMode(0o640)
+	if runtime.GOOS == "windows" { // NTFS keeps 100 ns, and there are no group bits
+		want, wantMode = mt.Truncate(100*time.Nanosecond), 0o666
+	}
+	if !fi.ModTime().Equal(want) || fi.Mode().Perm() != wantMode {
 		t.Fatalf("mtime=%v mode=%v", fi.ModTime(), fi.Mode())
 	}
 	e.noParts(t)
@@ -371,8 +376,18 @@ func TestFetchCaseOnlyCollision(t *testing.T) {
 	d := ciDest{e.dst}
 	_, err := Fetch(context.Background(), e.src, "a.txt", d, "a.txt", "k1", ConflictFail, "linux", nil)
 	wantCode(t, err, vfs.CodeConflict)
-	if e.read(t, e.dstDir, "A.txt") != "old" || e.exists(e.dstDir, "a.txt") {
+	if e.read(t, e.dstDir, "A.txt") != "old" {
 		t.Fatal("existing file disturbed")
+	}
+	// From the listing: on a disk that folds case, Lstat of a.txt finds A.txt.
+	ents, err := os.ReadDir(e.dstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, de := range ents {
+		if de.Name() != "A.txt" && de.Name() != vfs.PartDir {
+			t.Errorf("destination holds %q", de.Name())
+		}
 	}
 }
 

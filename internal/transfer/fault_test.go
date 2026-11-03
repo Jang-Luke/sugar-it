@@ -2,7 +2,9 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -137,6 +139,78 @@ func (r *faultReader) Read(b []byte) (int, error) {
 }
 
 func (r *faultReader) Close() error { return r.rc.Close() }
+
+// diskName encodes a path so that any disk can hold it and keep it apart from
+// any other: every name is stored in lower-case ASCII that no filesystem folds,
+// normalizes or refuses. A test of what happens to "A" and "a", or to "a:b", on
+// another OS cannot put those names in a real directory on every OS, and the
+// source of such a job is usually on another host anyway.
+func diskName(p string) string {
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '/', c == '.', c == '_', c == '-':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02x", c)
+		}
+	}
+	return b.String()
+}
+
+// presentedName is the path diskName encoded.
+func presentedName(p string) string {
+	s, err := url.PathUnescape(p)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// namedFS presents the names diskName stored: a share that holds exactly the
+// names a test asked for, on any OS.
+type namedFS struct{ *shares.LocalFS }
+
+func presented(e vfs.Entry) vfs.Entry {
+	e.Name, e.Path = presentedName(e.Name), presentedName(e.Path)
+	return e
+}
+
+func (n namedFS) List(ctx context.Context, p string) ([]vfs.Entry, error) {
+	es, err := n.LocalFS.List(ctx, diskName(p))
+	for i := range es {
+		es[i] = presented(es[i])
+	}
+	return es, err
+}
+func (n namedFS) Stat(ctx context.Context, p string) (vfs.Entry, error) {
+	e, err := n.LocalFS.Stat(ctx, diskName(p))
+	return presented(e), err
+}
+func (n namedFS) Open(ctx context.Context, p string, off int64, etag string) (io.ReadCloser, vfs.Entry, error) {
+	rc, e, err := n.LocalFS.Open(ctx, diskName(p), off, etag)
+	return rc, presented(e), err
+}
+func (n namedFS) Hash(ctx context.Context, p string) (string, error) {
+	return n.LocalFS.Hash(ctx, diskName(p))
+}
+func (n namedFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptions) (vfs.Entry, error) {
+	e, err := n.LocalFS.Put(ctx, diskName(p), r, o)
+	return presented(e), err
+}
+func (n namedFS) Mkdir(ctx context.Context, p string) error {
+	return n.LocalFS.Mkdir(ctx, diskName(p))
+}
+func (n namedFS) Remove(ctx context.Context, p string, recursive bool) error {
+	return n.LocalFS.Remove(ctx, diskName(p), recursive)
+}
+func (n namedFS) Rename(ctx context.Context, from, to string) error {
+	return n.LocalFS.Rename(ctx, diskName(from), diskName(to))
+}
+func (n namedFS) CommitPart(key, dst string, mt time.Time, mode uint32) error {
+	return n.LocalFS.CommitPart(key, diskName(dst), mt, mode)
+}
+func (n namedFS) SyncParent(p string) error { return n.LocalFS.SyncParent(diskName(p)) }
 
 // ciDest is a destination whose Stat ignores case, like Windows or macOS.
 type ciDest struct{ *shares.LocalFS }

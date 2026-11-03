@@ -42,6 +42,11 @@ type rig struct {
 	selfSrc vfs.FS // if set, what Source returns for this host's share "d"
 	down    bool   // source peer offline
 
+	// What the shares present; the env's own LocalFS unless named was called.
+	srcView vfs.FS
+	dstView Dest
+	encoded bool // names on disk are diskName's
+
 	opts   Options
 	m      *Manager
 	cancel context.CancelFunc
@@ -51,7 +56,7 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	e := newEnv(t)
-	r := &rig{env: e, t: t, dir: t.TempDir(), srcF: e.src, dstF: e.dst}
+	r := &rig{env: e, t: t, dir: t.TempDir(), srcF: e.src, dstF: e.dst, srcView: e.src, dstView: e.dst}
 	r.opts = Options{
 		Dir: r.dir, SelfID: self, Concurrency: 2, GOOS: "linux",
 		Source: func(peer, share string) (vfs.FS, error) {
@@ -91,6 +96,40 @@ func newRig(t *testing.T) *rig {
 	}
 	t.Cleanup(r.stop)
 	return r
+}
+
+// named makes both shares hold names no real directory on this OS may be able
+// to, such as "A" and "a" or "a:b". Paths given to the rig's helpers stay as the
+// job sees them.
+func (r *rig) named() {
+	r.encoded = true
+	r.srcView, r.dstView = namedFS{r.src}, namedFS{r.dst}
+	r.srcF, r.dstF = r.srcView, r.dstView
+}
+
+// onDisk is where a path given to the rig really is, relative to its share.
+func (r *rig) onDisk(name string) string {
+	if r.encoded {
+		name = diskName(name)
+	}
+	return filepath.FromSlash(name)
+}
+
+func (r *rig) exists(dir, name string) bool { return r.env.exists(dir, r.onDisk(name)) }
+
+// wantNoEntry looks in the listing: on Windows Lstat finds the device behind
+// a name like CON.
+func (r *rig) wantNoEntry(dir, name string) {
+	r.t.Helper()
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, de := range des {
+		if de.Name() == name {
+			r.t.Errorf("%s exists in %s", name, dir)
+		}
+	}
 }
 
 func (r *rig) set(fn func()) {
@@ -185,7 +224,7 @@ func (r *rig) waitDone(id string) Job {
 func (r *rig) tree(dir string, files map[string]string) {
 	r.t.Helper()
 	for name, data := range files {
-		p := filepath.Join(dir, filepath.FromSlash(name))
+		p := filepath.Join(dir, r.onDisk(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			r.t.Fatal(err)
 		}
@@ -197,7 +236,7 @@ func (r *rig) tree(dir string, files map[string]string) {
 
 func (r *rig) wantFile(dir, name, data string) {
 	r.t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+	b, err := os.ReadFile(filepath.Join(dir, r.onDisk(name)))
 	if err != nil {
 		r.t.Errorf("%s: %v", name, err)
 	} else if string(b) != data {
@@ -568,6 +607,9 @@ func TestMoveSameShareIsRename(t *testing.T) {
 	f := newFault(r.dst)
 	r.dstF = faultDest{r.dst, f}
 	before, _ := os.Stat(filepath.Join(r.dstDir, "t"))
+	// On Windows os.Stat's identity is read from the path at the first
+	// SameFile, and after the rename that path is gone.
+	os.SameFile(before, before)
 	r.start()
 	j := r.waitDone(r.submit(sameShare("move", "t", "new/parent/u", ConflictFail)))
 	calls := f.callLog()
@@ -1227,9 +1269,10 @@ func (d *renameKillDest) Rename(ctx context.Context, from, to string) error {
 
 func TestInvalidParentNameFailsItem(t *testing.T) {
 	r := newRig(t)
+	r.named()
 	r.opts.GOOS = "windows"
 	r.tree(r.srcDir, map[string]string{"t/a:b/f": "x", "t/a:b/deeper/g": "y", "t/ok": "ok", "t/sub/fine": "fine"})
-	if err := os.Mkdir(filepath.Join(r.srcDir, "t/e:mpty"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(r.srcDir, r.onDisk("t/e:mpty")), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	r.start()
@@ -1266,11 +1309,12 @@ func TestInvalidNameInDestinationPath(t *testing.T) {
 		t.Errorf("%+v", j)
 	}
 	r.wantFile(r.srcDir, "f", "x")
-	r.wantGone(r.dstDir, "CON")
+	r.wantNoEntry(r.dstDir, "CON")
 }
 
 func TestSameShareInvalidNameKeepsSource(t *testing.T) {
 	r := newRig(t)
+	r.named()
 	r.opts.GOOS = "windows"
 	r.tree(r.dstDir, map[string]string{"t/a:b/f": "x", "t/ok": "ok"})
 	r.start()
@@ -1733,7 +1777,8 @@ func TestJobFilePrivateAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
+	// Windows has no such bits: it reports 0o666 for every writable file.
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		t.Errorf("mode %v", fi.Mode())
 	}
 }
@@ -1758,41 +1803,42 @@ func openRO(dir string) (*shares.LocalFS, error) {
 
 // foldDest behaves like a case-insensitive destination: names differing only
 // in case are the same file.
-type foldDest struct{ *shares.LocalFS }
+type foldDest struct{ Dest }
 
 func fold(p string) string { return strings.ToLower(p) }
 
 func (d foldDest) Stat(ctx context.Context, p string) (vfs.Entry, error) {
-	return d.LocalFS.Stat(ctx, fold(p))
+	return d.Dest.Stat(ctx, fold(p))
 }
 func (d foldDest) List(ctx context.Context, p string) ([]vfs.Entry, error) {
-	return d.LocalFS.List(ctx, fold(p))
+	return d.Dest.List(ctx, fold(p))
 }
 func (d foldDest) Hash(ctx context.Context, p string) (string, error) {
-	return d.LocalFS.Hash(ctx, fold(p))
+	return d.Dest.Hash(ctx, fold(p))
 }
 func (d foldDest) Mkdir(ctx context.Context, p string) error {
-	return d.LocalFS.Mkdir(ctx, fold(p))
+	return d.Dest.Mkdir(ctx, fold(p))
 }
 func (d foldDest) Remove(ctx context.Context, p string, recursive bool) error {
-	return d.LocalFS.Remove(ctx, fold(p), recursive)
+	return d.Dest.Remove(ctx, fold(p), recursive)
 }
 func (d foldDest) Rename(ctx context.Context, from, to string) error {
-	return d.LocalFS.Rename(ctx, fold(from), fold(to))
+	return d.Dest.Rename(ctx, fold(from), fold(to))
 }
 func (d foldDest) CommitPart(key, dst string, mt time.Time, mode uint32) error {
-	return d.LocalFS.CommitPart(key, fold(dst), mt, mode)
+	return d.Dest.CommitPart(key, fold(dst), mt, mode)
 }
 
-func (d foldDest) SyncParent(p string) error { return d.LocalFS.SyncParent(fold(p)) }
+func (d foldDest) SyncParent(p string) error { return d.Dest.SyncParent(fold(p)) }
 
 func TestCaseOnlyCollisionKeepsSecondSource(t *testing.T) {
 	for _, op := range []string{"move", "copy"} {
 		for _, c := range []Conflict{ConflictFail, ConflictSkip, ConflictOverwrite, ConflictRename} {
 			t.Run(op+"/"+string(c), func(t *testing.T) {
 				r := newRig(t)
+				r.named()
 				r.opts.GOOS = "darwin"
-				r.dstF = foldDest{r.dst}
+				r.dstF = foldDest{r.dstView}
 				r.tree(r.srcDir, map[string]string{"t/A": "upper", "t/a": "lower", "t/z": "other"})
 				r.start()
 				s := cpSpec(op, "t", "")
@@ -1832,6 +1878,7 @@ func TestCaseOnlyCollisionKeepsSecondSource(t *testing.T) {
 
 func TestCaseOnlyNamesBothArriveOnCaseSensitiveDest(t *testing.T) {
 	r := newRig(t)
+	r.named()
 	r.tree(r.srcDir, map[string]string{"t/A": "upper", "t/a": "lower"})
 	r.start()
 	j := r.waitDone(r.submit(cpSpec("move", "t", "")))
@@ -1840,6 +1887,73 @@ func TestCaseOnlyNamesBothArriveOnCaseSensitiveDest(t *testing.T) {
 	}
 	r.wantFile(r.dstDir, "t/A", "upper")
 	r.wantFile(r.dstDir, "t/a", "lower")
+}
+
+// On a disk that really folds the names, with the real LocalFS and this OS's
+// rules: nothing above emulates anything here. The source holds both names, as
+// one on another host can. Linux has no such disk by default, and there the
+// tests above show the logic through foldDest and apfsDest.
+func TestCollisionOnARealFoldingDisk(t *testing.T) {
+	for _, c := range collisionNames {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			if !diskFolds(t, r.dstDir, c.first, c.second) {
+				t.Skipf("this disk keeps %q and %q apart", c.first, c.second)
+			}
+			r.opts.GOOS = runtime.GOOS
+			r.srcF = namedFS{r.src}
+			first, second := diskName("t/"+c.first), diskName("t/"+c.second)
+			r.tree(r.srcDir, map[string]string{first: "first", second: "second"})
+			r.start()
+			s := cpSpec("move", "t", "")
+			s.OnConflict = ConflictOverwrite
+			id := r.submit(s)
+			j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
+			if j.State != StatePartial || j.DoneFiles != 1 || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
+				t.Fatalf("%+v", j)
+			}
+			r.wantFile(r.dstDir, "t/"+c.first, "first")
+			r.wantFile(r.srcDir, second, "second") // the only copy of it
+			if r.env.exists(r.srcDir, first) {
+				t.Errorf("%s was not moved", c.first)
+			}
+			if ents, _ := os.ReadDir(filepath.Join(r.dstDir, "t")); len(ents) != 1 {
+				t.Errorf("destination: %v", ents)
+			}
+		})
+	}
+}
+
+// And on a disk that keeps them apart, both really arrive under their own names.
+func TestCollisionNamesOnARealPreservingDisk(t *testing.T) {
+	for _, c := range collisionNames {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			if diskFolds(t, r.dstDir, c.first, c.second) {
+				t.Skipf("this disk folds %q and %q into one file", c.first, c.second)
+			}
+			r.tree(r.srcDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
+			r.start()
+			j := r.waitDone(r.submit(cpSpec("move", "t", "")))
+			if j.DoneFiles != 2 {
+				t.Errorf("%+v", j)
+			}
+			r.wantFile(r.dstDir, "t/"+c.first, "first")
+			r.wantFile(r.dstDir, "t/"+c.second, "second")
+		})
+	}
+}
+
+// diskFolds reports whether a file named first can be reached as second in dir.
+func diskFolds(t *testing.T, dir, first, second string) bool {
+	t.Helper()
+	p := filepath.Join(dir, first)
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(p)
+	_, err := os.Lstat(filepath.Join(dir, second))
+	return err == nil
 }
 
 // a/a into the root resolves to a: a/a/a/x would land on a/a/x, the job's own
@@ -1987,7 +2101,7 @@ func TestActivePart(t *testing.T) {
 // apfsDest behaves like APFS: names differing by case or by Unicode
 // normalization are one file. It records the names the job asked for.
 type apfsDest struct {
-	*shares.LocalFS
+	Dest
 	mu        sync.Mutex
 	committed []string
 }
@@ -1995,31 +2109,31 @@ type apfsDest struct {
 func apfsName(p string) string { return norm.NFC.String(strings.ToLower(p)) }
 
 func (d *apfsDest) Stat(ctx context.Context, p string) (vfs.Entry, error) {
-	return d.LocalFS.Stat(ctx, apfsName(p))
+	return d.Dest.Stat(ctx, apfsName(p))
 }
 func (d *apfsDest) List(ctx context.Context, p string) ([]vfs.Entry, error) {
-	return d.LocalFS.List(ctx, apfsName(p))
+	return d.Dest.List(ctx, apfsName(p))
 }
 func (d *apfsDest) Hash(ctx context.Context, p string) (string, error) {
-	return d.LocalFS.Hash(ctx, apfsName(p))
+	return d.Dest.Hash(ctx, apfsName(p))
 }
 func (d *apfsDest) Mkdir(ctx context.Context, p string) error {
-	return d.LocalFS.Mkdir(ctx, apfsName(p))
+	return d.Dest.Mkdir(ctx, apfsName(p))
 }
 func (d *apfsDest) Remove(ctx context.Context, p string, recursive bool) error {
-	return d.LocalFS.Remove(ctx, apfsName(p), recursive)
+	return d.Dest.Remove(ctx, apfsName(p), recursive)
 }
 func (d *apfsDest) Rename(ctx context.Context, from, to string) error {
-	return d.LocalFS.Rename(ctx, apfsName(from), apfsName(to))
+	return d.Dest.Rename(ctx, apfsName(from), apfsName(to))
 }
 func (d *apfsDest) CommitPart(key, dst string, mt time.Time, mode uint32) error {
 	d.mu.Lock()
 	d.committed = append(d.committed, dst)
 	d.mu.Unlock()
-	return d.LocalFS.CommitPart(key, apfsName(dst), mt, mode)
+	return d.Dest.CommitPart(key, apfsName(dst), mt, mode)
 }
 
-func (d *apfsDest) SyncParent(p string) error { return d.LocalFS.SyncParent(apfsName(p)) }
+func (d *apfsDest) SyncParent(p string) error { return d.Dest.SyncParent(apfsName(p)) }
 
 var (
 	koreanNFC = norm.NFC.String("한글.txt")
@@ -2033,8 +2147,9 @@ func TestNormalizationCollisionKeepsSecondSource(t *testing.T) {
 	for _, op := range []string{"move", "copy"} {
 		t.Run(op, func(t *testing.T) {
 			r := newRig(t)
+			r.named()
 			r.opts.GOOS = "darwin"
-			d := &apfsDest{LocalFS: r.dst}
+			d := &apfsDest{Dest: r.dstView}
 			r.dstF = d
 			// The walk is sorted by bytes: the NFD spelling comes first.
 			r.tree(r.srcDir, map[string]string{"t/" + koreanNFD: "nfd-content", "t/" + koreanNFC: "nfc-content"})
@@ -2073,6 +2188,7 @@ func TestNormalizationCollisionKeepsSecondSource(t *testing.T) {
 // A destination that keeps bytes keeps them exactly, on any OS.
 func TestNormalizationSpellingsKeptByteForByte(t *testing.T) {
 	r := newRig(t)
+	r.named()
 	r.opts.GOOS = "windows"
 	r.tree(r.srcDir, map[string]string{"t/" + koreanNFD: "nfd-content", "t/" + koreanNFC: "nfc-content"})
 	r.start()
@@ -2084,6 +2200,7 @@ func TestNormalizationSpellingsKeptByteForByte(t *testing.T) {
 	r.wantFile(r.dstDir, "t/"+koreanNFC, "nfc-content")
 
 	r2 := newRig(t)
+	r2.named()
 	r2.opts.GOOS = "darwin"
 	r2.tree(r2.srcDir, map[string]string{koreanNFD: "only"})
 	r2.start()
@@ -2160,16 +2277,17 @@ func TestPowerCutAfterSourceRemovalLosesNothing(t *testing.T) {
 	for _, c := range collisionNames {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t)
+			r.named()
 			r.opts.GOOS = "darwin"
 			power := r.trackSyncs()
-			r.dstF = &apfsDest{LocalFS: r.dst}
+			r.dstF = &apfsDest{Dest: r.dstView}
 			r.tree(r.srcDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
-			f := newFault(r.src)
+			f := newFault(r.srcView)
 			var once sync.Once
 			f.onRemove = func(p string) error {
 				var err error
 				once.Do(func() {
-					if rerr := os.Remove(filepath.Join(r.srcDir, p)); rerr != nil {
+					if rerr := os.Remove(filepath.Join(r.srcDir, r.onDisk(p))); rerr != nil {
 						t.Error(rerr)
 					}
 					r.cancel()
@@ -2186,7 +2304,7 @@ func TestPowerCutAfterSourceRemovalLosesNothing(t *testing.T) {
 			r.wantGone(r.srcDir, "t/"+c.first)
 			power.cut(t, filepath.Join(r.dir, "jobs", id))
 
-			r.srcF = r.src
+			r.srcF = r.srcView
 			r.start()
 			j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
 			if j.State != StatePartial || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
@@ -2212,7 +2330,7 @@ func (d *renameCollisionDest) Rename(ctx context.Context, from, to string) error
 	if d.err != nil {
 		return d.err
 	}
-	if err := d.LocalFS.Rename(ctx, from, apfsName(to)); err != nil {
+	if err := d.Dest.Rename(ctx, from, apfsName(to)); err != nil {
 		return err
 	}
 	var ret error
@@ -2233,14 +2351,15 @@ func TestKillAfterItemRenameLosesNothing(t *testing.T) {
 		for _, cut := range []bool{false, true} {
 			t.Run(c.name+"/powercut="+strconv.FormatBool(cut), func(t *testing.T) {
 				r := newRig(t)
+				r.named()
 				r.opts.GOOS = "darwin"
 				power := r.trackSyncs()
 				r.tree(r.dstDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
 				if err := os.MkdirAll(filepath.Join(r.dstDir, "u/t"), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				r.selfSrc = r.dst
-				r.dstF = &renameCollisionDest{apfsDest: &apfsDest{LocalFS: r.dst}, kill: func() { r.cancel() }}
+				r.selfSrc = r.dstView
+				r.dstF = &renameCollisionDest{apfsDest: &apfsDest{Dest: r.dstView}, kill: func() { r.cancel() }}
 				r.start()
 				id := r.submit(sameShare("move", "t", "u", ConflictOverwrite))
 				r.waitStopped()
@@ -2249,7 +2368,7 @@ func TestKillAfterItemRenameLosesNothing(t *testing.T) {
 					power.cut(t, filepath.Join(r.dir, "jobs", id))
 				}
 
-				r.dstF = &renameCollisionDest{apfsDest: &apfsDest{LocalFS: r.dst}}
+				r.dstF = &renameCollisionDest{apfsDest: &apfsDest{Dest: r.dstView}}
 				r.start()
 				j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
 				if j.State != StatePartial || j.DoneFiles != 1 || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
@@ -2377,7 +2496,7 @@ func TestItemRenameErrorFailsItemOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.selfSrc = r.dst
-	r.dstF = &renameCollisionDest{apfsDest: &apfsDest{LocalFS: r.dst}, err: vfs.E(vfs.CodeInternal, "no")}
+	r.dstF = &renameCollisionDest{apfsDest: &apfsDest{Dest: r.dst}, err: vfs.E(vfs.CodeInternal, "no")}
 	r.start()
 	id := r.submit(sameShare("move", "t", "u", ConflictFail))
 	j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
@@ -2504,8 +2623,9 @@ func TestKilledBeforeLogSyncThenPowerCut(t *testing.T) {
 	for _, c := range collisionNames {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t)
+			r.named()
 			r.opts.GOOS = "darwin"
-			r.dstF = &apfsDest{LocalFS: r.dst}
+			r.dstF = &apfsDest{Dest: r.dstView}
 			r.tree(r.srcDir, map[string]string{"t/" + c.first: "first", "t/" + c.second: "second"})
 			s := cpSpec("move", "t", "")
 			s.OnConflict = ConflictOverwrite
@@ -2528,7 +2648,7 @@ func TestKilledBeforeLogSyncThenPowerCut(t *testing.T) {
 			// The restart removes the first source; the power then goes.
 			power := r.trackSyncs()
 			logPath := filepath.Join(r.dir, "jobs", id, "done.log")
-			f := newFault(r.src)
+			f := newFault(r.srcView)
 			var once sync.Once
 			f.onRemove = func(p string) error {
 				var err error
@@ -2543,7 +2663,7 @@ func TestKilledBeforeLogSyncThenPowerCut(t *testing.T) {
 					if covered != st.Size() {
 						t.Errorf("source goes with %d of %d log bytes synced", covered, st.Size())
 					}
-					if rerr := os.Remove(filepath.Join(r.srcDir, p)); rerr != nil {
+					if rerr := os.Remove(filepath.Join(r.srcDir, r.onDisk(p))); rerr != nil {
 						t.Error(rerr)
 					}
 					r.cancel()
@@ -2557,7 +2677,7 @@ func TestKilledBeforeLogSyncThenPowerCut(t *testing.T) {
 			r.wantGone(r.srcDir, "t/"+c.first)
 			power.cut(t, filepath.Join(r.dir, "jobs", id))
 
-			r.srcF = r.src
+			r.srcF = r.srcView
 			r.start()
 			j := waitState(t, r.m, id, StatePartial, StateDone, StateFailed)
 			if j.State != StatePartial || j.FailedFiles != 1 || j.Failures[0].Code != vfs.CodeConflict {
@@ -2611,6 +2731,12 @@ func TestLogSyncAlwaysFailingNeverRemovesSource(t *testing.T) {
 
 // done.log's own name must be durable before a source may go.
 func TestJobDirSyncFailureKeepsSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// syncDir does nothing there, so no directory sync can fail. A name's
+		// durability is left to NTFS; TestLogSyncAlwaysFailingNeverRemovesSource
+		// still covers the log's contents.
+		t.Skip("Windows cannot fsync a directory")
+	}
 	r := newRig(t)
 	r.opts.syncFile = func(f *os.File) error {
 		if st, err := f.Stat(); err == nil && st.IsDir() {
