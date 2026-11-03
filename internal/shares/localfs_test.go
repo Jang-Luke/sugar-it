@@ -736,7 +736,11 @@ func TestNamesLeftAloneOffWindows(t *testing.T) {
 		t.Skip("these names cannot exist on Windows; TestNamesThisOSCannotHave covers it")
 	}
 	l, dir := newShare(t, false)
-	for _, name := range []string{"a:b", "CON", "f.", "\xff\xfe"} {
+	names := []string{"a:b", "CON", "f."}
+	if runtime.GOOS != "darwin" { // APFS refuses names that are not UTF-8 (EILSEQ).
+		names = append(names, "\xff\xfe")
+	}
+	for _, name := range names {
 		write(t, filepath.Join(dir, name), "x")
 		if got := readAll(t, l, name); got != "x" {
 			t.Errorf("%q = %q", name, got)

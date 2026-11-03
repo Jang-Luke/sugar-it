@@ -74,7 +74,13 @@ jobs:
         if: matrix.name == 'windows'
         run: choco install nsis -y --no-progress
       - name: Install Wails
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+        # proxy.golang.org has dropped downloads on the hosted runners; retry them.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1 && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            sleep 30
+          done
       - name: Build
         working-directory: desktop
         run: ${{ matrix.build }}

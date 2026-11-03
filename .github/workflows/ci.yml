@@ -60,6 +60,14 @@ jobs:
           npm ci
           npm run build
           npm test -- --run
+      - name: Download modules
+        working-directory: desktop
+        run: |
+          for attempt in 1 2 3 4 5; do
+            go mod download && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            sleep 30
+          done
       - name: Vet and test the desktop Go code
         working-directory: desktop
         run: |
@@ -68,5 +76,10 @@ jobs:
       - name: Build the desktop app
         working-directory: desktop
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+          # proxy.golang.org has dropped downloads on the hosted runners; retry them.
+          for attempt in 1 2 3 4 5; do
+            go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1 && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            sleep 30
+          done
           wails build -tags webkit2_41
