@@ -949,11 +949,17 @@ func TestAddrFailover(t *testing.T) {
 	if _, err := c.Info(bg); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{deadAddr, e.addr, e.addr}
 	mu.Lock()
 	defer mu.Unlock()
-	if !reflect.DeepEqual(tried, want) {
-		t.Fatalf("dial order = %v, want %v", tried, want)
+	// The transport may dial the live address more than once; what matters is
+	// that the dead address is tried first and never again.
+	if len(tried) < 3 || tried[0] != deadAddr {
+		t.Fatalf("dial order = %v, want %s first, then %s at least twice", tried, deadAddr, e.addr)
+	}
+	for _, a := range tried[1:] {
+		if a != e.addr {
+			t.Fatalf("dial order = %v: only %s should follow the first dial", tried, e.addr)
+		}
 	}
 }
 

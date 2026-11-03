@@ -179,8 +179,13 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer
   scripts, and that binary prints its version. The rpm packages were built but
   never unpacked or installed, and the macOS binaries were built but never run.
-- Mounting on macOS and on Windows, and on Linux (the build host has no
-  `gvfs-backends`).
+- Mounting on macOS and on Linux (the build host has no `gvfs-backends`), and a
+  usable mount on Windows. Over SSH, `sugar-it mount` has no console for the
+  password prompt and fails with system error 1244, and a `net use` given the
+  token connected but showed the drive as unavailable, which may come from the
+  SSH logon. A mount from a desktop session has not been tried.
+- `sugar-it service install` keeping working on Windows; see the Defender note
+  below. Running it as a non-administrator has not been tried.
 - The desktop app walk-through (no display on the build host). Its Go and
   front-end tests pass; the window has never been opened.
 - The release workflow has never run, so `wails build -platform
@@ -191,6 +196,12 @@ the daemon has it open, because `os.Root` holds the directory without
 `FILE_SHARE_DELETE`. `sugar-it share remove` or stopping the daemon releases it.
 Windows also has no directory fsync, so after a power cut a new name's survival
 depends on NTFS, where Linux and macOS sync the directory first.
+
+**Windows Defender**: in one test, Defender reported `Behavior:Win32/Execution.A!ml`
+and removed `sugar-it.exe` and its scheduled task shortly after
+`sugar-it service install` and `schtasks /Run`. That binary was unsigned, in
+`%TEMP%`, and run over SSH, so an installed copy may behave differently; this
+has not been tested. If it happens to you, Windows Security shows the detection.
 
 ## Development
 
