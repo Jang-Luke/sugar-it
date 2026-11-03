@@ -221,7 +221,11 @@ func (b backend) SubmitJob(callerID string, s transfer.Spec) (transfer.Job, erro
 			return transfer.Job{}, vfs.E(vfs.CodeInvalidRequest, "source host is not a member")
 		}
 	}
-	return m.Submit(callerID, s)
+	j, err := m.Submit(callerID, s)
+	if err == nil && b.n.IsRemoved(callerID) {
+		m.PeerRemoved(callerID) // removed while the request was on its way in
+	}
+	return j, err
 }
 
 func (b backend) ListJobs(origin string) []transfer.Job {

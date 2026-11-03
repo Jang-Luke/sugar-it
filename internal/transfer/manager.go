@@ -38,6 +38,10 @@ type Options struct {
 	Source         func(peerID, share string) (vfs.FS, error)
 	SourceReadOnly func(ctx context.Context, peerID, share string) (bool, error)
 	Dest           func(share string) (Dest, error)
+	// Removed reports whether a host has been removed from the mesh. Consulted
+	// at recovery and by Retry; PeerRemoved covers removals while running. Nil
+	// means no host is.
+	Removed func(id string) bool
 
 	RetryMin, RetryMax, SaveEvery time.Duration // default 1s, 60s, 1s
 
@@ -51,6 +55,7 @@ type jobState struct {
 	saveMu     sync.Mutex // serializes job.json writes, taken before Manager.mu
 	queued     bool
 	cancel     context.CancelFunc // set while an attempt runs
+	stopErr    *ItemError         // the running attempt was stopped to end the job as failed with this
 	backoff    time.Duration
 	progressed bool
 	timerGen   int             // invalidates a pending retry timer
@@ -108,8 +113,10 @@ func NewManager(o Options) (*Manager, error) {
 		m.jobs[r.ID] = js
 		switch {
 		case js.State.terminal():
-		case js.CancelRequested:
+		case js.CancelRequested, m.removed(js.Origin):
 			m.finishCancel(js)
+		case m.removed(js.Spec.Src.Peer):
+			m.setState(js, StateFailed, sourceRemoved(js))
 		default:
 			if js.State == StateRunning {
 				js.State = StateQueued
@@ -290,12 +297,8 @@ func (m *Manager) Cancel(id string) error {
 		return vfs.E(vfs.CodeInvalidRequest, "job already %s", js.State)
 	}
 	js.CancelRequested = true
-	js.timerGen++
 	cancel := js.cancel // nil means no attempt is running or can settle now
-	if js.queued {
-		js.queued = false
-		m.queue = slices.DeleteFunc(m.queue, func(q *jobState) bool { return q == js })
-	}
+	m.dequeueLocked(js)
 	m.mu.Unlock()
 	m.save(js) // best effort: a lost intent means the job resumes after a kill
 	if cancel != nil {
@@ -306,8 +309,69 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
+// removed reports whether id is another host that was removed from the mesh.
+func (m *Manager) removed(id string) bool {
+	return m.o.Removed != nil && id != m.o.SelfID && m.o.Removed(id)
+}
+
+func sourceRemoved(js *jobState) *ItemError {
+	return &ItemError{js.Spec.Src.Path, vfs.CodePeerNotFound, "the source host was removed from the mesh"}
+}
+
+// PeerRemoved ends the unfinished jobs that depend on a host just removed from
+// the mesh. A job it requested is canceled like any other: parts removed, files
+// already moved stay. A job reading from it fails with peer_not_found, keeping
+// its sources and parts, and can be retried once the host is paired again. A
+// job that is both is canceled: nobody who may still ask for it is left.
+// Calling it again changes nothing.
+func (m *Manager) PeerRemoved(id string) {
+	if id == "" || id == m.o.SelfID {
+		return
+	}
+	m.mu.Lock()
+	var cancels, failed []*jobState
+	var stops []context.CancelFunc
+	for _, js := range m.jobs {
+		switch {
+		case js.State.terminal() || js.CancelRequested:
+		case js.Origin == id:
+			cancels = append(cancels, js)
+		case js.Spec.Src.Peer == id && js.cancel != nil:
+			if js.stopErr == nil {
+				js.stopErr = sourceRemoved(js)
+				stops = append(stops, js.cancel)
+			}
+		case js.Spec.Src.Peer == id:
+			m.dequeueLocked(js)
+			js.State, js.Error = StateFailed, sourceRemoved(js)
+			failed = append(failed, js)
+		}
+	}
+	m.mu.Unlock()
+	for _, stop := range stops {
+		stop()
+	}
+	for _, js := range failed {
+		m.save(js) // best effort: recovery reaches the same state
+	}
+	for _, js := range cancels {
+		m.Cancel(js.ID) // an error means it has just finished by itself
+	}
+}
+
+// dequeueLocked takes a job that has no running attempt off the queue and
+// disarms its retry timer.
+func (m *Manager) dequeueLocked(js *jobState) {
+	js.timerGen++
+	if js.queued {
+		js.queued = false
+		m.queue = slices.DeleteFunc(m.queue, func(q *jobState) bool { return q == js })
+	}
+}
+
 // Retry requeues a job that ended failed, partial or canceled. done.log keeps
-// its finished items; everything else is attempted again.
+// its finished items; everything else is attempted again. A job requested by a
+// host that has since been removed stays ended until that host is paired again.
 func (m *Manager) Retry(id string) error {
 	m.mu.Lock()
 	js, ok := m.jobs[id]
@@ -319,8 +383,13 @@ func (m *Manager) Retry(id string) error {
 		defer m.mu.Unlock()
 		return vfs.E(vfs.CodeInvalidRequest, "cannot retry a %s job", js.State)
 	}
+	if m.removed(js.Origin) {
+		defer m.mu.Unlock()
+		return vfs.E(vfs.CodePeerNotFound, "the host that requested this job was removed from the mesh")
+	}
 	js.State = StateQueued
 	js.Error = nil
+	js.stopErr = nil
 	js.CancelRequested = false
 	js.backoff = 0
 	resetCounters(js)
@@ -473,7 +542,7 @@ func (m *Manager) startTicker(js *jobState) (stop func()) {
 func (m *Manager) settle(ctx context.Context, js *jobState, err error) {
 	for {
 		m.mu.Lock()
-		cancelRequested, failedFiles := js.CancelRequested, js.FailedFiles
+		cancelRequested, stopErr, failedFiles := js.CancelRequested, js.stopErr, js.FailedFiles
 		m.mu.Unlock()
 
 		var next State
@@ -488,6 +557,8 @@ func (m *Manager) settle(ctx context.Context, js *jobState, err error) {
 		case cancelRequested:
 			next = StateCanceled
 			m.removeParts(js)
+		case stopErr != nil:
+			next, nextErr = StateFailed, stopErr // parts stay, as below
 		case ctx.Err() != nil:
 			next = "" // shutting down: stays unfinished on disk
 		case vfs.CodeOf(err) == vfs.CodePeerOffline:
@@ -499,11 +570,12 @@ func (m *Manager) settle(ctx context.Context, js *jobState, err error) {
 		}
 
 		m.mu.Lock()
-		if err != nil && js.CancelRequested != cancelRequested {
+		if err != nil && (js.CancelRequested != cancelRequested || js.stopErr != stopErr) {
 			m.mu.Unlock()
-			continue // a Cancel arrived while deciding
+			continue // a Cancel or a removal arrived while deciding
 		}
 		js.cancel = nil
+		js.stopErr = nil
 		js.BytesPerSec = 0
 		m.running--
 		if next != "" {

@@ -171,7 +171,7 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 	}
 	d.jobs, err = transfer.NewManager(transfer.Options{
 		Dir: dir, SelfID: id.ID, Concurrency: cfg.MaxConcurrentJobs,
-		Source: d.n.SourceFS, SourceReadOnly: d.n.SourceReadOnly, Dest: d.n.DestFS,
+		Source: d.n.SourceFS, SourceReadOnly: d.n.SourceReadOnly, Dest: d.n.DestFS, Removed: d.n.IsRemoved,
 	})
 	if err != nil {
 		return nil, err

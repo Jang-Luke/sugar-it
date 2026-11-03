@@ -2654,3 +2654,110 @@ func TestJobDirSyncUnsupportedIsNoOp(t *testing.T) {
 		r.stop()
 	}
 }
+
+// ---- removal of a host (spec 7) ----
+
+func TestPeerRemovedStopsWaitingJob(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	m := r.start()
+	r.set(func() { r.down = true })
+	id := r.submit(cpSpec("move", "f", "f"))
+	waitState(t, m, id, StateWaitingPeer)
+	m.PeerRemoved(peerB)
+	j, err := m.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.State != StateFailed || j.Error == nil || j.Error.Code != vfs.CodePeerNotFound {
+		t.Fatalf("job = %s %+v", j.State, j.Error)
+	}
+	r.set(func() { r.down = false })
+	time.Sleep(50 * time.Millisecond) // a retry timer must not bring it back
+	if j, _ := m.Get(id); j.State != StateFailed {
+		t.Fatalf("job came back as %s", j.State)
+	}
+	r.wantFile(r.srcDir, "f", "data")
+	if err := m.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	if j := r.waitDone(id); j.State != StateDone {
+		t.Fatalf("after retry: %s", j.State)
+	}
+	r.wantFile(r.dstDir, "f", "data")
+}
+
+func TestPeerRemovedIgnoresOtherHostsAndFinishedJobs(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	m := r.start()
+	id := r.submit(cpSpec("copy", "f", "f"))
+	r.waitDone(id)
+	m.PeerRemoved(peerB)
+	m.PeerRemoved("someone-else")
+	m.PeerRemoved(self)
+	m.PeerRemoved("")
+	if j, _ := m.Get(id); j.State != StateDone {
+		t.Fatalf("finished job became %s", j.State)
+	}
+}
+
+func TestRetryRefusedWhileOriginIsRemoved(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"f": "data"})
+	var removed atomic.Bool
+	removed.Store(true)
+	r.opts.Removed = func(id string) bool { return removed.Load() && id == "origin" }
+	m := r.start()
+	r.set(func() { r.down = true })
+	j, err := m.Submit("origin", cpSpec("copy", "f", "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, m, j.ID, StateWaitingPeer)
+	m.PeerRemoved("origin")
+	waitState(t, m, j.ID, StateCanceled)
+	if err := m.Retry(j.ID); vfs.CodeOf(err) != vfs.CodePeerNotFound {
+		t.Fatalf("Retry = %v, want peer_not_found", err)
+	}
+	r.set(func() { r.down = false })
+	removed.Store(false)
+	if err := m.Retry(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, m, j.ID, StateDone)
+}
+
+// A job from a removed source that was only queued at the kill: recovery fails
+// it without ever contacting anything.
+func TestRecoveryAppliesRemoval(t *testing.T) {
+	r := newRig(t)
+	r.tree(r.srcDir, map[string]string{"f": "data", "g": "data"})
+	m := r.start()
+	r.set(func() { r.down = true })
+	local, err := m.Submit(self, cpSpec("move", "f", "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromB := local.ID
+	byOrigin, err := m.Submit("origin", cpSpec("move", "g", "g"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, m, fromB, StateWaitingPeer)
+	waitState(t, m, byOrigin.ID, StateWaitingPeer)
+	r.stop()
+	r.opts.Removed = func(id string) bool { return id == peerB || id == "origin" }
+	m, err = NewManager(r.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := m.Get(fromB); j.State != StateFailed || j.Error == nil || j.Error.Code != vfs.CodePeerNotFound {
+		t.Fatalf("source removed: %s %+v", j.State, j.Error)
+	}
+	if j, _ := m.Get(byOrigin.ID); j.State != StateCanceled { // its source too: canceled wins
+		t.Fatalf("origin removed: %s", j.State)
+	}
+	r.wantFile(r.srcDir, "f", "data")
+	r.wantFile(r.srcDir, "g", "data")
+}

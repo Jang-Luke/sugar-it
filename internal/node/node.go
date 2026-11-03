@@ -355,6 +355,14 @@ func (n *Node) RemovePeer(name string) error {
 	return nil
 }
 
+// IsRemoved reports whether id has been removed from the mesh, as opposed to
+// being a member or never having been heard of. It is transfer.Options.Removed.
+func (n *Node) IsRemoved(id string) bool {
+	ms := n.cfg.Get().Members
+	i := indexOf(ms, id)
+	return i >= 0 && ms[i].Removed
+}
+
 // RenameSelf changes this host's name. Only the owner may, and the higher
 // generation carries it to the others.
 func (n *Node) RenameSelf(newName string) error {

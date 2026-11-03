@@ -95,13 +95,17 @@ func (n *Node) mergeIn(remote []mesh.Member, adopt *mesh.Member) (bool, error) {
 }
 
 // forgetInactive drops clients and status of members that are gone, and ends
-// what they have in flight here. The config already says they are gone, so
-// nothing new of theirs can start.
+// what they have in flight here: their requests and the jobs that depend on
+// them. The config already says they are gone, so nothing new of theirs can
+// start.
 func (n *Node) forgetInactive() {
 	active := map[string]bool{}
+	var removed []string
 	for _, m := range n.cfg.Get().Members {
 		if !m.Removed {
 			active[m.ID] = true
+		} else if m.ID != n.id.ID {
+			removed = append(removed, m.ID)
 		}
 	}
 	n.mu.Lock()
@@ -126,6 +130,11 @@ func (n *Node) forgetInactive() {
 	n.mu.Unlock()
 	for _, c := range stale {
 		c.SetAddrs(nil) // closes idle connections
+	}
+	if m := n.jobs.Load(); m != nil {
+		for _, id := range removed {
+			m.PeerRemoved(id)
+		}
 	}
 }
 

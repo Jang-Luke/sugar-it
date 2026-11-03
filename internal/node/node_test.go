@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1202,5 +1203,67 @@ func TestRepairedHostCanDownloadAgain(t *testing.T) {
 	defer rc2.Close()
 	if _, err := io.ReadFull(rc2, make([]byte, 1<<20)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A tombstone arriving by gossip stops jobs just as a local removal does.
+func TestGossipedRemovalStopsJobs(t *testing.T) {
+	a, b, c := trio(t)
+	src := b.share("s", nil)
+	for i := range 30 {
+		f, err := os.Create(filepath.Join(src, "f"+strconv.Itoa(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(8 << 20); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	a.share("d", nil)
+	m, err := transfer.NewManager(transfer.Options{Dir: t.TempDir(), SelfID: a.id.ID, Source: a.n.SourceFS, SourceReadOnly: a.n.SourceReadOnly, Dest: a.n.DestFS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.n.AttachJobs(m)
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan struct{})
+	go func() { defer close(done); m.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	j, err := m.Submit(a.id.ID, transfer.Spec{Op: "move",
+		Src: transfer.Endpoint{Peer: b.id.ID, Share: "s", Path: ""},
+		Dst: transfer.Endpoint{Peer: a.id.ID, Share: "d", Path: "out/"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		got, err := m.Get(j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.DoneFiles >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := c.n.RemovePeer("bravo"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		got, err := m.Get(j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.State == transfer.StateDone || got.State == transfer.StateFailed || got.State == transfer.StatePartial {
+			if got.State != transfer.StateFailed || got.Error == nil || got.Error.Code != vfs.CodePeerNotFound {
+				t.Fatalf("job ended %s (%+v) after %d/%d files", got.State, got.Error, got.DoneFiles, got.TotalFiles)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job still %s", got.State)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

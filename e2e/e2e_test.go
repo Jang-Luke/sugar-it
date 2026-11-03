@@ -488,16 +488,14 @@ func TestRemovedPeerLosesAccess(t *testing.T) {
 		t.Fatalf("before removal: exit %d %s", r.code, r.err)
 	}
 	a.mustCLI("peer", "remove", "c")
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		r := c.cli("ls", "a:s")
-		if r.code != 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("c can still list a:s after removal:\n%s", r.out)
-		}
-		time.Sleep(100 * time.Millisecond)
+	// a refuses c at once, so nothing but the denial may be seen here: not a
+	// daemon that stopped answering or any other reason for a non-zero exit.
+	r := c.cli("ls", "a:s")
+	if r.code == 0 {
+		t.Fatalf("c can still list a:s after removal:\n%s", r.out)
+	}
+	if r.code != 1 || !strings.Contains(r.err, vfs.CodePeerUnauthorized) {
+		t.Fatalf("c was not denied access: exit %d\nstdout: %s\nstderr: %s", r.code, r.out, r.err)
 	}
 }
 

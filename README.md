@@ -114,6 +114,12 @@ views have converged. A removed host that has not yet learned it was removed
 can still create an invitation, and running `peer add` with it re-admits that
 host; do not use invitations from a host you removed.
 
+Removal takes effect on what is already running, whether you removed the host
+or the news arrived from another one. Its open downloads, uploads and hashes on
+this host stop at once. A job reading from it fails with `peer_not_found`,
+keeps its sources, and can be retried after pairing again. A job it requested is
+canceled; files already moved stay moved.
+
 ## Network drive (`sugar-it mount`)
 
 `sugar-it mount` exposes the whole mesh through the local WebDAV server and
