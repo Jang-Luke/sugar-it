@@ -35,3 +35,46 @@ export function canDrop(src: Pane, dst: Pane): boolean {
 export function snapshotSelection(p: Pane, entries: Entry[]): { pane: Pane; entries: Entry[] } {
   return { pane: { ...p }, entries: [...entries] }
 }
+
+/**
+ * Explorer's convention. Shift always moves and Ctrl always copies (when both
+ * are held, copy: it destroys nothing). With neither, a drop inside the same
+ * peer and share is a move and a drop anywhere else is a copy.
+ */
+export function dropOperation(
+  src: Pane,
+  dst: Pane,
+  mods: { shift: boolean; ctrl: boolean },
+): 'copy' | 'move' {
+  if (mods.ctrl) return 'copy'
+  if (mods.shift) return 'move'
+  return src.peer === dst.peer && src.share === dst.share ? 'move' : 'copy'
+}
+
+export type DropRefusal = 'noShare' | 'empty' | 'self' | 'noop'
+export type DropPlan = { ok: true; dest: Pane; target: string } | { ok: false; reason: DropRefusal }
+
+/**
+ * Where a drop of `entries` (listed directly in `src`) onto `dst` goes. Dropped
+ * on a folder row (`over`) it goes into that folder; on anything else, into the
+ * pane's own folder. `dest` and `target` are copies: they do not change when
+ * a pane navigates or refreshes afterwards. `target` always ends with "/", so
+ * the spec's cp rule puts the entries under it.
+ *
+ * Refused: nothing dragged, a pane without a share, a target that is one of the
+ * dragged entries or inside one, and a target that already holds the entries.
+ */
+export function planDrop(src: Pane, entries: Entry[], dst: Pane, over?: Entry | null): DropPlan {
+  if (entries.length === 0) return { ok: false, reason: 'empty' }
+  if (src.share === '' || dst.share === '') return { ok: false, reason: 'noShare' }
+  const dest: Pane = over && over.Type === 'dir' ? { ...dst, path: joinPath(dst.path, over.Name) } : { ...dst }
+  const sameShare = src.peer === dest.peer && src.share === dest.share
+  if (sameShare) {
+    for (const e of entries) {
+      const p = joinPath(src.path, e.Name)
+      if (dest.path === p || dest.path.startsWith(p + '/')) return { ok: false, reason: 'self' }
+    }
+    if (dest.path === src.path) return { ok: false, reason: 'noop' }
+  }
+  return { ok: true, dest, target: targetOf(dest) }
+}

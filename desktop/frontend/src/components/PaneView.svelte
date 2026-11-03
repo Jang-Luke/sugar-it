@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { ko } from '../ko'
   import { parseError, type Api, type ApiError, type Entry, type PeerStatus, type ShareInfo } from '../lib/api'
-  import { canDrop, joinPath, type Pane } from '../lib/panes'
+  import { dropOperation, joinPath, planDrop, type Pane } from '../lib/panes'
+  import { AutoRefresher } from '../lib/refresh'
   import { errorText } from '../lib/transfers'
   import { formatBytes, formatTime } from '../lib/format'
   import { EntryLoader } from '../lib/listing'
@@ -14,29 +15,37 @@
   export let active = false
   export let selected: Entry[] = []
   export let dragSrc: Pane | null = null // the pane a drag started from, if one is under way
+  export let dragEntries: Entry[] = [] // what is being dragged
+  export let paused = false // a dialog or menu is open: no background refresh
 
   const dispatch = createEventDispatcher<{
     activate: void
     dragstart: Entry[]
     dragend: void
-    drop: { move: boolean }
+    drop: { shift: boolean; ctrl: boolean; over: Entry | null }
+    contextmenu: { x: number; y: number; row: Entry | null }
     changed: void
   }>()
 
   let shares: ShareInfo[] = []
   let entries: Entry[] = []
   let error: ApiError | null = null
+  let bgError: ApiError | null = null
   let loading = false
   let sharesSeq = 0 // drops share lists that arrive after a newer request
   // Rows and selection are emptied the moment a load starts; see EntryLoader.
   const loader = new EntryLoader(() => {
     entries = loader.entries
     error = loader.error
+    bgError = loader.bgError
     loading = loader.loading
     selected = loader.selected
   })
   let list: VirtualList
-  let over = false
+  let over = false // the drop would go to this pane's own folder
+  let overRow: Entry | null = null // the folder row the drop would go into
+  let hint: { text: string; x: number; y: number } | null = null
+  let root: HTMLElement
 
   $: peerNames = ([{ name: 'local', label: ko.common.local as string, note: '' }]).concat(
     peers.map((p) => ({
@@ -85,6 +94,39 @@
   /** Reload what is shown, keeping the folder. */
   export function refresh() {
     return shares.length === 0 || error ? loadShares() : loadEntries()
+  }
+
+  /** Reload the same folder silently; see EntryLoader.refresh. */
+  async function backgroundRefresh() {
+    if (pane.share === '') return
+    const { peer, share, path } = pane
+    await loader.refresh(
+      () => api.list(peer, share, path),
+      () => selected,
+      () => pane.peer === peer && pane.share === share && pane.path === path,
+    )
+  }
+
+  const refresher = new AutoRefresher({
+    run: backgroundRefresh,
+    canRun: () =>
+      document.visibilityState === 'visible' &&
+      root?.offsetParent !== null && // not on another tab
+      !paused &&
+      dragSrc === null &&
+      pane.share !== '' &&
+      shares.length > 0 &&
+      !loading,
+  })
+
+  /** Refresh soon, silently (a job touching this pane changed). */
+  export function requestRefresh() {
+    refresher.request()
+  }
+
+  /** Open a folder of this pane by name, as a double click does. */
+  export function openFolder(name: string) {
+    enter({ Name: name, Type: 'dir' } as Entry)
   }
 
   function retry() {
@@ -143,22 +185,78 @@
     dispatch('dragstart', selected)
   }
 
-  function dragOver(ev: DragEvent) {
-    if (dragSrc && canDrop(dragSrc, pane)) {
-      ev.preventDefault()
-      over = true
+  /** What dropping the current drag on this pane, or on one of its rows, would do. */
+  function plan(row: Entry | null, ev: DragEvent) {
+    if (!dragSrc) return null
+    const p = planDrop(dragSrc, dragEntries, pane, row)
+    if (!p.ok) return null
+    const op = dropOperation(dragSrc, p.dest, { shift: ev.shiftKey, ctrl: ev.ctrlKey })
+    return { p, op }
+  }
+
+  function dragOver(ev: DragEvent, row: Entry | null) {
+    // A refused row must not fall through to the pane's own folder.
+    if (row) ev.stopPropagation()
+    const r = plan(row, ev)
+    if (!r) {
+      overRow = null
+      over = false
+      hint = null
+      return
+    }
+    ev.preventDefault()
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = r.op
+    const folder = row !== null && row.Type === 'dir'
+    overRow = folder ? row : null
+    over = !folder
+    const host = r.p.dest.peer === 'local' ? (ko.common.local as string) : r.p.dest.peer
+    const where = `${host}:${r.p.dest.share}/${r.p.dest.path}`
+    hint = {
+      text: ko.files.dropHint(r.op === 'copy' ? ko.files.opCopy : ko.files.opMove, where),
+      x: ev.clientX,
+      y: ev.clientY,
     }
   }
 
-  function dropped(ev: DragEvent) {
+  function clearDrag() {
     over = false
-    if (dragSrc && canDrop(dragSrc, pane)) {
-      ev.preventDefault()
-      dispatch('drop', { move: ev.shiftKey })
-    }
+    overRow = null
+    hint = null
   }
 
-  onMount(() => void loadShares())
+  function leavePane(ev: DragEvent) {
+    if (!root?.contains(ev.relatedTarget as Node | null)) clearDrag()
+  }
+
+  function dropped(ev: DragEvent, row: Entry | null) {
+    if (row) ev.stopPropagation()
+    const r = plan(row, ev)
+    clearDrag()
+    if (!r) return
+    ev.preventDefault()
+    dispatch('drop', { shift: ev.shiftKey, ctrl: ev.ctrlKey, over: row })
+  }
+
+  function context(ev: MouseEvent, row: Entry | null) {
+    ev.preventDefault()
+    ev.stopPropagation()
+    dispatch('activate')
+    dispatch('contextmenu', { x: ev.clientX, y: ev.clientY, row })
+  }
+
+  function visible() {
+    if (document.visibilityState === 'visible') refresher.request()
+  }
+
+  onMount(() => {
+    void loadShares()
+    refresher.start()
+    document.addEventListener('visibilitychange', visible)
+  })
+  onDestroy(() => {
+    refresher.stop()
+    document.removeEventListener('visibilitychange', visible)
+  })
 
   $: crumbs = pane.path === '' ? [] : pane.path.split('/')
   $: readOnly = shares.find((s) => s.Name === pane.share)?.ReadOnly ?? false
@@ -169,10 +267,11 @@
   class="pane"
   class:active
   class:over
+  bind:this={root}
   on:mousedown={() => dispatch('activate')}
-  on:dragover={dragOver}
-  on:dragleave={() => (over = false)}
-  on:drop={dropped}
+  on:dragover={(ev) => dragOver(ev, null)}
+  on:dragleave={leavePane}
+  on:drop={(ev) => dropped(ev, null)}
 >
   <div class="head row">
     <label>
@@ -207,6 +306,13 @@
     {#if readOnly}<span class="chip">{ko.common.readOnly}</span>{/if}
   </div>
 
+  {#if bgError && !error}
+    <div class="err">
+      <div class="error"><strong>{ko.files.refreshFailed}</strong></div>
+      <div class="muted mono">{errorText(bgError.code)}{bgError.message ? ' · ' + bgError.message : ''}</div>
+    </div>
+  {/if}
+
   {#if error}
     <div class="err">
       <div class="error"><strong>{errorText(error.code)}</strong></div>
@@ -224,6 +330,8 @@
   <div class="cols muted">
     <span class="c-name">{ko.files.name}</span><span class="c-size">{ko.files.size}</span><span class="c-time">{ko.files.modified}</span>
   </div>
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="listwrap" on:contextmenu={(ev) => context(ev, null)}>
   <VirtualList bind:this={list} items={error ? [] : entries} rowHeight={28} let:item>
     <div
       class="entry"
@@ -232,11 +340,15 @@
       tabindex="-1"
       on:keydown={(ev) => ev.key === 'Enter' && enter(item)}
       class:sel={selected.includes(item)}
+      class:dropon={overRow === item}
       draggable="true"
       on:click={(ev) => select(item, ev)}
       on:dblclick={() => enter(item)}
       on:dragstart={(ev) => dragStart(ev, item)}
-      on:dragend={() => dispatch('dragend')}
+      on:dragend={() => (clearDrag(), dispatch('dragend'))}
+      on:dragover={(ev) => dragOver(ev, item)}
+      on:drop={(ev) => dropped(ev, item)}
+      on:contextmenu={(ev) => context(ev, item)}
     >
       <span class="c-name" title={item.Name}>
         <span class="kind muted">{item.Type === 'dir' ? '▸' : item.Type === 'file' ? '·' : '◦'}</span>{item.Name}
@@ -245,10 +357,15 @@
       <span class="c-time muted">{formatTime(item.ModTime)}</span>
     </div>
   </VirtualList>
+  </div>
   <div class="foot muted">
     {ko.files.items(entries.length)}{selected.length ? ' · ' + ko.files.selected(selected.length) : ''}
   </div>
 </section>
+
+{#if hint}
+  <div class="drophint" style="left: {hint.x + 14}px; top: {hint.y + 18}px">{hint.text}</div>
+{/if}
 
 <style>
   .pane {
@@ -267,6 +384,12 @@
   .entry { height: 100%; cursor: default; user-select: none; }
   .entry:hover { background: var(--row-hover); }
   .entry.sel { background: var(--row-sel); }
+  .entry.dropon { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--row-sel); }
+  .listwrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .drophint {
+    position: fixed; z-index: 40; pointer-events: none; padding: 3px 8px; border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--accent); font-size: 12px; white-space: nowrap;
+  }
   .c-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .c-size { width: 80px; text-align: right; flex: none; }
   .c-time { width: 130px; flex: none; }

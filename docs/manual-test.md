@@ -119,7 +119,7 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
    a file, "복사 →". A notice appears; the Transfers tab shows the progress bar,
    speed and a final "완료". Compare hashes of source and result with
    `sha256sum`.
-5. Drag a file from one pane to the other (copy); drag with Shift held (move).
+5. Drag a file from one pane to the other (a copy when the panes show different shares or hosts, a move within one share); see 14 for the modifier keys.
    Choose "이름 바꿔 저장" before copying a name that already exists: a `(1)`
    copy appears. With "실패 처리", the transfer ends "일부 실패"/"실패" and the
    Transfers tab lists the item with a Korean reason; "재시도" works.
@@ -156,3 +156,47 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     "서비스 제거" asks first, then stops and removes the service.
 12. Kill the in-process daemon's port by starting another process on it before
     launch: the window shows the start error banner instead of crashing.
+13. Automatic refresh (two panes, two hosts or two shares; not yet rendered).
+    a. Create a file in a folder shown in a pane from outside the app (a shell
+    or another host): within about 3 seconds it appears with no click on
+    "새로 고침", the scroll position is unchanged and nothing blanks or shows
+    "불러오는 중".
+    b. Select a file, then delete another one outside: the selection stays on
+    the first. Delete the selected file outside: it leaves the list and the
+    selection and the "선택 n개" count follow.
+    c. Minimize the window or switch to another tab and change files: nothing
+    is requested (watch the daemon log or WebDAV access log); on return the
+    list updates within a few seconds. Open a delete dialog or a context menu:
+    no refresh happens until it closes.
+    d. Start a copy between the panes: the destination pane shows files as they
+    finish, without waiting for the job to leave the active set, and a small
+    job that finishes within one second still shows up.
+    e. In a folder of 100,000 files, listing takes seconds: the app does not
+    refresh again until ten times that duration has passed.
+    f. Navigate into a folder while a refresh is slow (stop the other host
+    briefly): the old folder's rows never reappear. Stop host B while viewing
+    its folder: the rows stay and a "목록을 새로 고치지 못했습니다" note shows;
+    navigating to another folder on B instead clears the rows and shows the
+    error.
+14. Drag rules (not yet rendered). Without a key: dropping inside the same
+    host and share (the other pane, or a folder row) moves; dropping on another
+    host or share copies. The pointer and the small label beside it say
+    "이동 → ..." or "복사 → ..." and match what happens. Shift always moves,
+    Ctrl always copies, both held copies. The "이름이 겹치면" selector still
+    applies.
+15. Drop onto a folder (not yet rendered). Hovering a folder row outlines it;
+    dropping puts the entries inside that folder, not in the pane's folder.
+    Dropping on empty space or on a file row targets the pane's own folder.
+    Also drag onto a folder row in the same pane. These are refused with a
+    message and start no job: a folder onto itself or into its own subfolder
+    (also through the other pane), and entries dropped on the folder they
+    already sit in. Change folders in the middle of starting a large drop: the
+    jobs still go to the folder dropped on.
+16. Context menu (not yet rendered). Right click a row: the native menu does
+    not appear; "열기" (folders only, one item), "다른 패널로 복사", "다른 패널로
+    이동", "이름 변경" (one item only) and "삭제". Right click an unselected row
+    selects only it; right click inside a selection keeps it. Delete still
+    asks and names the items. Right click empty space: "새 폴더" and
+    "새로 고침". Items are greyed out when the matching toolbar button is.
+    The menu closes on a click outside it, Escape and scrolling the list, and
+    stays inside the window when opened near the right or bottom edge.

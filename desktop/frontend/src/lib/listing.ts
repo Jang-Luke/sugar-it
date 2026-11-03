@@ -17,6 +17,8 @@ export class EntryLoader {
   entries: Entry[] = []
   selected: Entry[] = []
   error: ApiError | null = null
+  /** The last background refresh failed; rows and selection were kept. */
+  bgError: ApiError | null = null
   loading = false
   private seq = 0
 
@@ -27,7 +29,49 @@ export class EntryLoader {
     this.seq++
     this.entries = []
     this.selected = []
+    this.bgError = null
     this.loading = false
+  }
+
+  /**
+   * A silent reload of the same folder. It never blanks anything: rows are
+   * replaced only if the listing changed, the selection is kept by name, and a
+   * failure leaves rows and selection alone (see bgError). A reply is dropped
+   * ('discarded') if a navigation, load or invalidate happened since the
+   * request, or if `isCurrent` says the pane is no longer on the folder asked
+   * for; so it can never bring back rows of a folder the user has left.
+   * `getSelected` is read when the reply arrives.
+   */
+  async refresh(
+    fetch: () => Promise<Entry[] | null>,
+    getSelected: () => Entry[],
+    isCurrent: () => boolean = () => true,
+  ): Promise<'replaced' | 'same' | 'failed' | 'discarded'> {
+    if (this.loading) return 'discarded'
+    const my = this.seq
+    let es: Entry[]
+    try {
+      es = sortEntries((await fetch()) ?? [])
+    } catch (e) {
+      if (my !== this.seq || !isCurrent()) return 'discarded'
+      this.selected = getSelected()
+      if (this.error === null) this.bgError = parseError(e)
+      this.onChange()
+      return 'failed'
+    }
+    if (my !== this.seq || !isCurrent()) return 'discarded'
+    this.selected = getSelected()
+    const hadError = this.error !== null || this.bgError !== null
+    this.error = null
+    this.bgError = null
+    if (sameListing(this.entries, es)) {
+      if (hadError) this.onChange()
+      return 'same'
+    }
+    this.entries = es
+    this.selected = reconcileSelection(getSelected(), es)
+    this.onChange()
+    return 'replaced'
   }
 
   async load(fetch: () => Promise<Entry[] | null>): Promise<void> {
@@ -35,6 +79,7 @@ export class EntryLoader {
     this.entries = []
     this.selected = []
     this.error = null
+    this.bgError = null
     this.loading = true
     this.onChange()
     try {
@@ -48,4 +93,33 @@ export class EntryLoader {
     this.loading = false
     this.onChange()
   }
+}
+
+/** Whether two sorted listings show the same thing. */
+export function sameListing(a: Entry[], b: Entry[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i]
+    if (
+      x.Name !== y.Name || x.Type !== y.Type || x.Size !== y.Size ||
+      x.ModTime !== y.ModTime || x.Mode !== y.Mode || x.ETag !== y.ETag
+    ) return false
+  }
+  return true
+}
+
+/** The rows of `rows` whose names were selected, in the selection's order. */
+export function reconcileSelection(selected: Entry[], rows: Entry[]): Entry[] {
+  if (selected.length === 0) return []
+  const byName = new Map(rows.map((r) => [r.Name, r]))
+  const seen = new Set<string>()
+  const out: Entry[] = []
+  for (const s of selected) {
+    const r = byName.get(s.Name)
+    if (r && !seen.has(r.Name)) {
+      seen.add(r.Name)
+      out.push(r)
+    }
+  }
+  return out
 }

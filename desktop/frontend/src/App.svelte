@@ -116,7 +116,7 @@
   <section class="body">
     <!-- Files stays mounted so that the panes keep their place while another tab is open. -->
     <div class="tab" hidden={tab !== 'files'}>
-      <Files {api} peers={status?.Peers ?? []} {jobs} on:showTransfers={() => (tab = 'transfers')} />
+      <Files {api} peers={status?.Peers ?? []} {jobs} selfId={status?.ID ?? ''} on:showTransfers={() => (tab = 'transfers')} />
     </div>
     {#if tab === 'transfers'}
       <div class="tab">

@@ -191,8 +191,16 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
 - `sugar-it service install` on Windows actually starting the daemon at logon.
   The Run key value was written with correct quoting and removed again, from an
   administrator session. A non-administrator has not been tried.
-- The macOS and Windows desktop assets have been built by the release workflow
-  but never opened.
+- The macOS desktop asset has been built by the release workflow but never
+  opened. The Windows app has been opened and used: the file panes work within
+  one host, with the buttons and drag copy working. Dragging by the Explorer
+  rules (move or copy, drops onto folder rows), the right-click menu and the
+  automatic refresh were added after that and have not been rendered or run
+  in any window.
+- On Windows, `sugar-it.exe` is a console program, so registering it to run at
+  logon (`sugar-it service install`) shows a console window each time, whereas
+  `sugar-it-desktop.exe` is a GUI-subsystem program and shows none. The install
+  only writes the Run key value; it takes effect at the next logon, not now.
 
 **Known limit on Windows**: a share folder cannot be renamed or deleted while
 the daemon has it open, because `os.Root` holds the directory without

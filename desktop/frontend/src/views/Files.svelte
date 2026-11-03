@@ -2,14 +2,18 @@
   import { createEventDispatcher } from 'svelte'
   import { ko } from '../ko'
   import { parseError, type Api, type ApiError, type Conflict, type Entry, type Job, type PeerStatus } from '../lib/api'
-  import { canDrop, joinPath, snapshotSelection, targetOf, type Pane } from '../lib/panes'
-  import { errorText, isActive } from '../lib/transfers'
+  import { dropOperation, joinPath, planDrop, snapshotSelection, targetOf, type DropRefusal, type Pane } from '../lib/panes'
+  import { actionStates, contextSelection } from '../lib/menu'
+  import { jobsChanged } from '../lib/refresh'
+  import { errorText } from '../lib/transfers'
+  import ContextMenu from '../components/ContextMenu.svelte'
   import Dialog from '../components/Dialog.svelte'
   import PaneView from '../components/PaneView.svelte'
 
   export let api: Api
   export let peers: PeerStatus[] = []
   export let jobs: Job[] = []
+  export let selfId = ''
 
   const dispatch = createEventDispatcher<{ showTransfers: void }>()
 
@@ -23,50 +27,53 @@
   const policies: Conflict[] = ['fail', 'skip', 'overwrite', 'rename']
   let conflict: Conflict = 'fail'
   let dragSrc: Pane | null = null
+  let dragEntries: Entry[] = []
   let notice: { ok: boolean; text: string; detail?: string } | null = null
   // A dialog acts on what was selected when it opened, not on what the pane shows later.
   let dialog: null | { kind: 'delete' | 'rename' | 'mkdir'; pane: Pane; entries: Entry[]; view: PaneView } = null
   let busy = false
+  // The context menu acts on what was selected when it opened.
+  let menu: null | { x: number; y: number; side: 'left' | 'right'; pane: Pane; entries: Entry[]; row: Entry | null } = null
 
   $: src = activeId === 'left' ? left : right
   $: dst = activeId === 'left' ? right : left
   $: srcSel = activeId === 'left' ? leftSel : rightSel
   $: srcView = activeId === 'left' ? leftView : rightView
 
-  // Refresh both panes whenever a transfer finishes.
-  let activeJobs = new Set<string>()
-  $: {
-    const now = new Set(jobs.filter(isActive).map((j) => j.ID))
-    let finished = false
-    for (const id of activeJobs) if (!now.has(id)) finished = true
-    activeJobs = now
-    if (finished) {
-      void leftView?.loadEntries()
-      void rightView?.loadEntries()
+  // Refresh both panes, silently, whenever a job touching what they show starts,
+  // progresses, changes state or disappears, so a job that finishes between two
+  // polls of the job list is not missed either.
+  let jobSigs = new Map<string, string>()
+  function onJobs(js: Job[]) {
+    const r = jobsChanged(jobSigs, js, [left, right], selfId, peers)
+    jobSigs = r.next
+    if (r.changed) {
+      leftView?.requestRefresh()
+      rightView?.requestRefresh()
     }
   }
+  $: onJobs(jobs)
 
   function fail(e: unknown) {
     const err: ApiError = parseError(e)
     notice = { ok: false, text: errorText(err.code), detail: err.message }
   }
 
-  function startTransfer(op: 'copy' | 'move', from: Pane, entries: Entry[], to: Pane) {
-    if (entries.length === 0) {
-      notice = { ok: false, text: ko.files.selectFirst }
+  function refusalText(r: DropRefusal): string {
+    return r === 'empty' ? ko.files.selectFirst : r === 'noShare' ? ko.files.pickShares : r === 'self' ? ko.files.dropSelf : ko.files.sameFolder
+  }
+
+  /** `over` is the folder row dropped on, if any; otherwise `to`'s own folder is the target. */
+  function startTransfer(op: 'copy' | 'move', from: Pane, entries: Entry[], to: Pane, over: Entry | null = null) {
+    const plan = planDrop(from, entries, to, over)
+    if (!plan.ok) {
+      notice = { ok: false, text: refusalText(plan.reason) }
       return Promise.resolve()
     }
-    if (from.share === '' || to.share === '') {
-      notice = { ok: false, text: ko.files.pickShares }
-      return Promise.resolve()
-    }
-    if (!canDrop(from, to)) {
-      notice = { ok: false, text: ko.files.sameFolder }
-      return Promise.resolve()
-    }
-    // Fix the targets now: navigating while jobs are being started must not change them.
+    // Fix the sources and the target now: navigating or refreshing while jobs
+    // are being started must not change them. The target ends with "/".
     const srcs = entries.map((e) => targetOf(from, e))
-    const dstTarget = targetOf(to)
+    const dstTarget = plan.target
     const policy = conflict
     return (async () => {
       busy = true
@@ -85,11 +92,20 @@
     })()
   }
 
-  function onDrop(target: Pane, move: boolean) {
-    const from = dragSrc
-    const entries = from ? (from.id === 'left' ? leftSel : rightSel) : []
+  function onDrop(target: Pane, d: { shift: boolean; ctrl: boolean; over: Entry | null }) {
+    // Copies: the panes may navigate or refresh while jobs start.
+    const from = dragSrc ? { ...dragSrc } : null
+    const entries = [...dragEntries]
+    const to = { ...target }
     dragSrc = null
-    if (from) void startTransfer(move ? 'move' : 'copy', from, entries, target)
+    dragEntries = []
+    if (!from) return
+    const plan = planDrop(from, entries, to, d.over)
+    if (!plan.ok) {
+      notice = { ok: false, text: refusalText(plan.reason) }
+      return
+    }
+    void startTransfer(dropOperation(from, plan.dest, d), from, entries, to, d.over)
   }
 
   async function doDelete() {
@@ -142,33 +158,96 @@
     }
   }
 
-  function ask(kind: 'delete' | 'rename' | 'mkdir') {
-    if (src.share === '') {
+  function askFor(kind: 'delete' | 'rename' | 'mkdir', p: Pane, sel: Entry[], view: PaneView) {
+    if (p.share === '') {
       notice = { ok: false, text: ko.files.pickShares }
       return
     }
-    if (kind !== 'mkdir' && srcSel.length === 0) {
+    if (kind !== 'mkdir' && sel.length === 0) {
       notice = { ok: false, text: ko.files.selectFirst }
       return
     }
-    if (kind === 'rename' && srcSel.length !== 1) {
+    if (kind === 'rename' && sel.length !== 1) {
       notice = { ok: false, text: ko.files.renameOne }
       return
     }
-    dialog = { kind, ...snapshotSelection(src, srcSel), view: srcView }
+    dialog = { kind, ...snapshotSelection(p, sel), view }
   }
 
-  $: canMove = canDrop(src, dst) && srcSel.length > 0 && !busy
+  const ask = (kind: 'delete' | 'rename' | 'mkdir') => askFor(kind, src, srcSel, srcView)
+
+  $: states = actionStates({ src, dst, sel: srcSel, busy })
+
+  function openMenu(side: 'left' | 'right', d: { x: number; y: number; row: Entry | null }) {
+    activeId = side
+    const sel = contextSelection(side === 'left' ? leftSel : rightSel, d.row)
+    if (side === 'left') leftSel = sel
+    else rightSel = sel
+    menu = { x: d.x, y: d.y, side, pane: { ...(side === 'left' ? left : right) }, entries: [...sel], row: d.row }
+  }
+
+  $: menuItems = menu ? menuList(menu, busy, left, right) : []
+  function menuList(m: NonNullable<typeof menu>, b: boolean, l: Pane, r: Pane) {
+    const other = m.side === 'left' ? r : l
+    if (m.row === null) {
+      const s = actionStates({ src: m.pane, dst: other, sel: m.entries, busy: b })
+      return [
+        { id: 'mkdir', label: ko.files.mkdir, enabled: s.mkdir },
+        { id: 'refresh', label: ko.common.refresh, enabled: true },
+      ]
+    }
+    const s = actionStates({ src: m.pane, dst: other, sel: m.entries, busy: b })
+    return [
+      { id: 'open', label: ko.files.menu.open, enabled: s.open },
+      { id: 'copy', label: ko.files.menu.copyOther, enabled: s.copy },
+      { id: 'move', label: ko.files.menu.moveOther, enabled: s.move },
+      { id: 'rename', label: ko.files.rename, enabled: s.rename },
+      { id: 'delete', label: ko.files.del, enabled: s.del, danger: true },
+    ]
+  }
+
+  function menuSelect(id: string) {
+    const m = menu
+    menu = null
+    if (!m) return
+    const view = m.side === 'left' ? leftView : rightView
+    const other = m.side === 'left' ? right : left
+    switch (id) {
+      case 'open':
+        if (m.entries.length === 1) view?.openFolder(m.entries[0].Name)
+        break
+      case 'copy':
+        void startTransfer('copy', m.pane, m.entries, other)
+        break
+      case 'move':
+        void startTransfer('move', m.pane, m.entries, other)
+        break
+      case 'rename':
+        askFor('rename', m.pane, m.entries, view)
+        break
+      case 'delete':
+        askFor('delete', m.pane, m.entries, view)
+        break
+      case 'mkdir':
+        askFor('mkdir', m.pane, m.entries, view)
+        break
+      case 'refresh':
+        void view?.refresh()
+        break
+    }
+  }
+
+  $: paused = dialog !== null || menu !== null
   $: shownNames = (dialog?.entries ?? []).slice(0, 5).map((e) => e.Name)
 </script>
 
 <div class="files">
   <div class="toolbar row">
-    <button disabled={!canMove} on:click={() => startTransfer('copy', src, srcSel, dst)}>{ko.files.copyTo}</button>
-    <button disabled={!canMove} on:click={() => startTransfer('move', src, srcSel, dst)}>{ko.files.moveTo}</button>
-    <button class="danger" disabled={busy || srcSel.length === 0} on:click={() => ask('delete')}>{ko.files.del}</button>
-    <button disabled={busy || srcSel.length !== 1} on:click={() => ask('rename')}>{ko.files.rename}</button>
-    <button disabled={busy || src.share === ''} on:click={() => ask('mkdir')}>{ko.files.mkdir}</button>
+    <button disabled={!states.copy} on:click={() => startTransfer('copy', src, srcSel, dst)}>{ko.files.copyTo}</button>
+    <button disabled={!states.move} on:click={() => startTransfer('move', src, srcSel, dst)}>{ko.files.moveTo}</button>
+    <button class="danger" disabled={!states.del} on:click={() => ask('delete')}>{ko.files.del}</button>
+    <button disabled={!states.rename} on:click={() => ask('rename')}>{ko.files.rename}</button>
+    <button disabled={!states.mkdir} on:click={() => ask('mkdir')}>{ko.files.mkdir}</button>
     <label class="policy">
       <span class="muted">{ko.files.conflict}</span>
       <select bind:value={conflict}>
@@ -197,10 +276,13 @@
       bind:selected={leftSel}
       active={activeId === 'left'}
       {dragSrc}
+      {dragEntries}
+      {paused}
       on:activate={() => (activeId = 'left')}
-      on:dragstart={() => (dragSrc = left)}
-      on:dragend={() => (dragSrc = null)}
-      on:drop={(e) => onDrop(left, e.detail.move)}
+      on:dragstart={(e) => ((dragSrc = { ...left }), (dragEntries = e.detail))}
+      on:dragend={() => ((dragSrc = null), (dragEntries = []))}
+      on:drop={(e) => onDrop(left, e.detail)}
+      on:contextmenu={(e) => openMenu('left', e.detail)}
     />
     <PaneView
       bind:this={rightView}
@@ -210,14 +292,21 @@
       bind:selected={rightSel}
       active={activeId === 'right'}
       {dragSrc}
+      {dragEntries}
+      {paused}
       on:activate={() => (activeId = 'right')}
-      on:dragstart={() => (dragSrc = right)}
-      on:dragend={() => (dragSrc = null)}
-      on:drop={(e) => onDrop(right, e.detail.move)}
+      on:dragstart={(e) => ((dragSrc = { ...right }), (dragEntries = e.detail))}
+      on:dragend={() => ((dragSrc = null), (dragEntries = []))}
+      on:drop={(e) => onDrop(right, e.detail)}
+      on:contextmenu={(e) => openMenu('right', e.detail)}
     />
   </div>
   <div class="muted hint">{ko.files.dragHint}</div>
 </div>
+
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} label={ko.files.menu.label} items={menuItems} on:select={(e) => menuSelect(e.detail)} on:close={() => (menu = null)} />
+{/if}
 
 {#if dialog?.kind === 'delete'}
   <Dialog

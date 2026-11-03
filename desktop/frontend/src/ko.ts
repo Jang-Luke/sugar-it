@@ -79,7 +79,17 @@ export const ko = {
       overwrite: '덮어쓰기',
       rename: '이름 바꿔 저장',
     },
-    dragHint: '파일을 반대편 패널로 끌어 놓으면 복사하고, Shift를 누르고 놓으면 이동합니다.',
+    dragHint:
+      '끌어 놓으면 같은 호스트의 같은 공유 안에서는 이동, 그 밖에는 복사합니다. Shift를 누르고 놓으면 항상 이동, Ctrl을 누르고 놓으면 항상 복사합니다. 폴더 위에 놓으면 그 폴더 안으로 들어갑니다.',
+    dropHint: (op: string, where: string) => `${op} → ${where}`,
+    dropSelf: '폴더를 자기 자신이나 그 하위 폴더로 옮길 수 없습니다.',
+    refreshFailed: '목록을 새로 고치지 못했습니다. 보이는 목록은 이전 상태일 수 있습니다.',
+    menu: {
+      label: '파일 메뉴',
+      open: '열기',
+      copyOther: '다른 패널로 복사',
+      moveOther: '다른 패널로 이동',
+    },
     selectFirst: '먼저 항목을 선택하세요.',
     pickShares: '양쪽 패널에서 공유를 선택하세요.',
     sameFolder: '같은 폴더로는 보낼 수 없습니다.',
