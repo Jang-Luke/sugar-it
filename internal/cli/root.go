@@ -17,6 +17,8 @@ import (
 	"sugarintegration/internal/config"
 	"sugarintegration/internal/control"
 	"sugarintegration/internal/daemon"
+	"sugarintegration/internal/mount"
+	"sugarintegration/internal/service"
 	"sugarintegration/internal/vfs"
 )
 
@@ -50,6 +52,8 @@ type env struct {
 	stdout, stderr io.Writer
 	configDir      string
 	json           bool
+	mountRunner    mount.Runner
+	svcRunner      service.Runner
 }
 
 // client connects to the running daemon of the config directory.
@@ -104,7 +108,11 @@ func exitWith(code int) error { return &exitError{code: code} }
 // Execute runs sugar-it with args (without the program name) and returns the
 // exit code. It builds a fresh command tree on every call.
 func Execute(args []string, stdout, stderr io.Writer) int {
-	e := &env{stdout: stdout, stderr: stderr}
+	return execute(&env{stdout: stdout, stderr: stderr, mountRunner: mount.ExecRunner{}, svcRunner: service.ExecRunner{}}, args)
+}
+
+func execute(e *env, args []string) int {
+	stdout, stderr := e.stdout, e.stderr
 	root := newRoot(e)
 	root.SetArgs(args)
 	root.SetOut(stdout)
@@ -149,7 +157,7 @@ func newRoot(e *env) *cobra.Command {
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr(err) })
 	root.AddCommand(e.daemonCmd(), e.statusCmd(), e.inviteCmd(), e.peerCmd(), e.shareCmd(),
-		e.lsCmd(), e.cpCmd("cp", "copy"), e.cpCmd("mv", "move"), e.rmCmd(), e.mkdirCmd(), e.renameCmd(), e.jobsCmd())
+		e.lsCmd(), e.cpCmd("cp", "copy"), e.cpCmd("mv", "move"), e.rmCmd(), e.mkdirCmd(), e.renameCmd(), e.jobsCmd(), e.mountCmd(), e.unmountCmd(), e.serviceCmd())
 	return root
 }
 

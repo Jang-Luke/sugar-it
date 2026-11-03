@@ -379,31 +379,65 @@ func TestHelperDaemon(t *testing.T) {
 	select {}
 }
 
-func TestLockReleasedAfterKill(t *testing.T) {
-	dir, o := setup(t, "alpha")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperDaemon$")
-	cmd.Env = append(os.Environ(), "SUGAR_IT_HELPER_DIR="+dir)
-	out, err := cmd.StdoutPipe()
+// repick gives the config in dir fresh loopback ports: freeAddr releases a port
+// before the daemon binds it, so another process can take it in between.
+func repick(t *testing.T, dir string) daemon.Options {
+	t.Helper()
+	store, err := config.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
+	peer := freeAddr(t)
+	if err := store.Update(func(c *config.Config) error {
+		c.ListenAddr, c.AdvertiseAddrs = peer, []string{peer}
+		c.ControlAddr, c.DAVAddr = freeAddr(t), freeAddr(t)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	sc := bufio.NewScanner(out)
-	ready := false
-	for sc.Scan() {
-		if sc.Text() == "READY" {
-			ready = true
-			break
+	return daemon.Options{ConfigDir: dir}
+}
+
+// startHelper runs the helper daemon process, retrying with new ports when a
+// port was taken between choosing and binding it.
+func startHelper(t *testing.T, dir string) *exec.Cmd {
+	t.Helper()
+	for attempt := 0; ; attempt++ {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHelperDaemon$")
+		cmd.Env = append(os.Environ(), "SUGAR_IT_HELPER_DIR="+dir)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
 		}
-		if strings.HasPrefix(sc.Text(), "ERR") {
-			t.Fatal(sc.Text())
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			line := sc.Text()
+			if line == "READY" {
+				return cmd
+			}
+			if strings.HasPrefix(line, "ERR") {
+				cmd.Wait()
+				if attempt < 5 && strings.Contains(line, "address already in use") {
+					repick(t, dir)
+					break
+				}
+				t.Fatal(line)
+			}
+		}
+		if cmd.ProcessState == nil { // no READY and no ERR: the process ended
+			cmd.Process.Kill()
+			cmd.Wait()
+			t.Fatal("helper daemon did not start")
 		}
 	}
-	if !ready {
-		t.Fatal("helper daemon did not start")
-	}
+}
+
+func TestLockReleasedAfterKill(t *testing.T) {
+	dir, _ := setup(t, "alpha")
+	cmd := startHelper(t, dir)
 	if d, err := daemon.Start(bg, daemon.Options{ConfigDir: dir, ListenAddr: "127.0.0.1:0", ControlAddr: "127.0.0.1:0", DAVAddr: "127.0.0.1:0"}); err == nil {
 		stop(t, d)
 		t.Fatal("started next to a live daemon in another process")
@@ -411,11 +445,20 @@ func TestLockReleasedAfterKill(t *testing.T) {
 	cmd.Process.Kill()
 	cmd.Wait()
 	// The dead process left runtime.json behind; the lock is gone anyway.
-	d := start(t, o)
+	var d *daemon.Daemon
+	for attempt := 0; ; attempt++ {
+		var err error
+		if d, err = daemon.Start(bg, daemon.Options{ConfigDir: dir}); err == nil {
+			break
+		} else if attempt >= 5 || !strings.Contains(err.Error(), "address already in use") {
+			t.Fatal(err)
+		}
+		repick(t, dir)
+	}
+	t.Cleanup(func() { stop(t, d) })
 	if _, err := control.Discover(dir); err != nil {
 		t.Fatal(err)
 	}
-	_ = d
 }
 
 func TestContextCancelStopsDaemon(t *testing.T) {
