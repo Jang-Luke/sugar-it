@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -363,18 +364,55 @@ func TestInstallServicePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Content, cli) || !strings.Contains(got.Content, dir) || !strings.Contains(got.Content, " daemon") {
+	if !strings.Contains(got.Content, `"`+cli+`" daemon --config-dir "`+dir+`"`) {
 		t.Errorf("unit does not run the CLI daemon on this config dir:\n%s", got.Content)
 	}
 	if !strings.Contains(res.Output, "installed") {
 		t.Errorf("result = %+v", res)
 	}
 
-	// No sugar-it next to the app and none on PATH: a clear error.
-	t.Setenv("PATH", t.TempDir())
+}
+
+// The desktop package has no sugar-it command, and a Finder-launched app has no
+// useful PATH: with nothing beside it, the service runs this program itself.
+func TestInstallServiceTargetsThisProgramWithoutCLIBeside(t *testing.T) {
+	onPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(onPath, cliName()), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", onPath)
+	dir := t.TempDir()
+	a := newApp(t, dir)
 	a.exeDir = t.TempDir()
-	_, err = a.InstallService()
-	if code, msg := parseErr(t, err); code != vfs.CodeNotFound || !strings.Contains(msg, "sugar-it") {
-		t.Errorf("got %s: %s", code, msg)
+	a.goos = "linux"
+	a.home = t.TempDir()
+	var got service.Unit
+	a.svcRun = func(_ context.Context, u service.Unit, _ io.Writer) error {
+		got = u
+		return nil
+	}
+	if _, err := a.InstallService(); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `"` + self + `" daemon --config-dir "` + dir + `"`
+	if !strings.Contains(got.Content, want) {
+		t.Errorf("unit does not run %s:\n%s", want, got.Content)
+	}
+}
+
+func TestDaemonArgumentRunsTheCLI(t *testing.T) {
+	var out, errb bytes.Buffer
+	code, handled := runDaemon([]string{"daemon", "--help"}, &out, &errb)
+	if !handled || code != 0 || !strings.Contains(out.String(), "Run the sugar-it daemon") {
+		t.Errorf("handled %v, code %d, stdout %q, stderr %q", handled, code, out.String(), errb.String())
+	}
+	for _, args := range [][]string{nil, {"--config-dir", "x"}, {"--config-dir", "daemon"}} {
+		if _, handled := runDaemon(args, &out, &errb); handled {
+			t.Errorf("%v must open the window", args)
+		}
 	}
 }

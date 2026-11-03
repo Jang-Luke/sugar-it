@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -432,30 +431,29 @@ func cliName() string {
 	return "sugar-it"
 }
 
-// findCLI locates the sugar-it command, which is what a service runs: this
-// program has no daemon subcommand. It looks beside this program, then on PATH.
-func (a *App) findCLI() (string, error) {
+// serviceTarget is the program a service runs: the sugar-it command beside this
+// program if there is one, else this program, whose first argument daemon starts
+// no window (see runDaemon). PATH is not searched: an app started from the Finder
+// does not have the user's, and a package carries one or the other.
+func (a *App) serviceTarget() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
 	dir := a.exeDir
 	if dir == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Dir(exe)
+		dir = filepath.Dir(self)
 	}
 	p := filepath.Join(dir, cliName())
 	if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 		return p, nil
 	}
-	if p, err := exec.LookPath(cliName()); err == nil {
-		return filepath.Abs(p)
-	}
-	return "", vfs.E(vfs.CodeNotFound, "the sugar-it command was not found beside the app or on PATH")
+	return self, nil
 }
 
 // InstallService installs the per-user background service for the config directory.
 func (a *App) InstallService() (ServiceResult, error) {
-	exe, err := a.findCLI()
+	exe, err := a.serviceTarget()
 	if err != nil {
 		return ServiceResult{}, wrapErr(err)
 	}

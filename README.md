@@ -25,7 +25,9 @@ Tagged releases are meant to provide the following. The first two items are buil
   they do not enable or start any service. Run `sugar-it service install` as
   your own user when you want the background service.
 - `sugar-it-desktop` (Wails GUI, not part of GoReleaser or `checksums.txt`): a Linux binary, a macOS universal `.app`
-  (zipped) and a Windows NSIS installer.
+  (zipped) and a Windows NSIS installer. These packages do not contain the
+  `sugar-it` command. The app's service button runs the app's own binary as the
+  daemon (`sugar-it-desktop daemon`, no window), or a `sugar-it` beside it.
 
 Build the desktop app yourself (Linux needs `libgtk-3-dev` and
 `libwebkit2gtk-4.1-dev`; the frontend must be built first because `main.go`

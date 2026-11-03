@@ -33,6 +33,8 @@ type Unit struct {
 
 // Plan builds the install plan for goos. exe is the sugar-it binary, home the
 // user's home directory, configDir the --config-dir to pass ("" for the default).
+// daemon is always the first argument: that is how the desktop binary, which
+// the service runs when there is no sugar-it beside it, knows to start no window.
 func Plan(goos, exe, home, configDir string) (Unit, error) {
 	if exe == "" {
 		return Unit{}, errors.New("no executable path")
@@ -40,12 +42,12 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 	switch goos {
 	case "linux":
 		p := path.Join(home, ".config", "systemd", "user", unitName)
-		args := `"` + systemdEscape(exe) + `"`
+		args := `"` + systemdEscape(exe) + `" daemon`
 		if configDir != "" {
 			args += ` --config-dir "` + systemdEscape(configDir) + `"`
 		}
 		content := "[Unit]\nDescription=sugar-it shared folder mesh\nAfter=network-online.target\n\n" +
-			"[Service]\nExecStart=" + args + " daemon\nRestart=on-failure\nRestartSec=5\n\n" +
+			"[Service]\nExecStart=" + args + "\nRestart=on-failure\nRestartSec=5\n\n" +
 			"[Install]\nWantedBy=default.target\n"
 		return Unit{Path: p, Content: content, Commands: [][]string{
 			{"loginctl", "enable-linger"},
@@ -54,11 +56,10 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 		}}, nil
 	case "darwin":
 		p := darwinPath(home)
-		argv := []string{exe}
+		argv := []string{exe, "daemon"}
 		if configDir != "" {
 			argv = append(argv, "--config-dir", configDir)
 		}
-		argv = append(argv, "daemon")
 		var b bytes.Buffer
 		b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 		b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
@@ -71,11 +72,10 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 		b.WriteString("\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>KeepAlive</key>\n\t<true/>\n</dict>\n</plist>\n")
 		return Unit{Path: p, Content: b.String(), Commands: [][]string{{"launchctl", "load", "-w", p}}}, nil
 	case "windows":
-		tr := `"` + exe + `"`
+		tr := `"` + exe + `" daemon`
 		if configDir != "" {
 			tr += ` --config-dir "` + configDir + `"`
 		}
-		tr += " daemon"
 		return Unit{Commands: [][]string{
 			{"schtasks", "/Create", "/SC", "ONLOGON", "/TN", taskName, "/TR", tr, "/RL", "LIMITED", "/F"},
 			{"schtasks", "/Run", "/TN", taskName},

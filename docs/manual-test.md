@@ -88,8 +88,9 @@ go test -tags webkit2_41 .
 wails build -tags webkit2_41      # output: desktop/build/bin/sugar-it-desktop
 ```
 
-Put the `sugar-it` command next to `sugar-it-desktop` (or on `PATH`): the
-service button installs a unit that runs `sugar-it daemon`.
+The service button installs a unit that runs the `sugar-it` command if one sits
+next to `sugar-it-desktop`, otherwise `sugar-it-desktop daemon` itself, which
+opens no window and needs no display.
 
 Use two config directories so one machine acts as two hosts. Host A is the app,
 host B a plain daemon on other ports:

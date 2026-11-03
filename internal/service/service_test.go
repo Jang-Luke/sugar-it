@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -30,7 +32,7 @@ func TestLinuxUnit(t *testing.T) {
 		t.Fatalf("commands %v", u.Commands)
 	}
 	u, _ = service.Plan("linux", "/x/sugar-it", "/home/ann", "/home/ann/cfg dir")
-	if !strings.Contains(u.Content, `ExecStart="/x/sugar-it" --config-dir "/home/ann/cfg dir" daemon`) {
+	if !strings.Contains(u.Content, `ExecStart="/x/sugar-it" daemon --config-dir "/home/ann/cfg dir"`) {
 		t.Fatalf("config dir missing:\n%s", u.Content)
 	}
 }
@@ -210,4 +212,22 @@ func hasAdjacent(c []string, words ...string) bool {
 		}
 	}
 	return i == len(words)
+}
+
+// The desktop binary only leaves GUI mode when daemon is its first argument.
+func TestDaemonIsTheFirstArgument(t *testing.T) {
+	u, err := service.Plan("darwin", "/a/sugar-it", "/Users/ann", "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`<string>/a/sugar-it</string>\s*<string>daemon</string>\s*<string>--config-dir</string>\s*<string>/cfg</string>`).MatchString(u.Content) {
+		t.Errorf("darwin arguments:\n%s", u.Content)
+	}
+	u, err = service.Plan("windows", `C:\a\sugar-it.exe`, `C:\Users\ann`, `C:\cfg`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"C:\a\sugar-it.exe" daemon --config-dir "C:\cfg"`; !slices.Contains(u.Commands[0], want) {
+		t.Errorf("windows command %v, want %s", u.Commands[0], want)
+	}
 }

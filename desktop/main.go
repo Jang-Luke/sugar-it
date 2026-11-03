@@ -3,17 +3,34 @@ package main
 import (
 	"embed"
 	"flag"
+	"io"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+
+	"sugarintegration/internal/cli"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// runDaemon handles the first argument daemon: the desktop package has no
+// sugar-it command, so its background service runs this program. It goes through
+// the CLI and never reaches Wails, so it starts no GTK and needs no display.
+func runDaemon(args []string, stdout, stderr io.Writer) (code int, handled bool) {
+	if len(args) == 0 || args[0] != "daemon" {
+		return 0, false
+	}
+	return cli.Execute(args, stdout, stderr), true
+}
+
 func main() {
+	if code, handled := runDaemon(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	configDir := flag.String("config-dir", "", "config directory (default: the user config directory's sugar-it)")
 	flag.Parse()
 	app := NewApp(*configDir)
