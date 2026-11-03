@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -42,6 +43,8 @@ type Daemon struct {
 	jobs *transfer.Manager
 	rt   control.Runtime
 
+	lock *os.File // daemon.lock, held while running
+
 	lns  [3]net.Listener // control, peer, dav
 	srvs [3]*http.Server
 
@@ -62,9 +65,30 @@ func listen(kind, addr string) (net.Listener, error) {
 	return ln, nil
 }
 
+// lockName is held for as long as a daemon runs on a config directory.
+const lockName = "daemon.lock"
+
+// acquireLock takes the directory's lock, or says another daemon holds it. The
+// lock goes away with the process, so it is never stale.
+func acquireLock(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, lockName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	got, err := lockFile(f)
+	if err != nil || !got {
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, vfs.E(vfs.CodeInternal, "another sugar-it daemon is already running with the config directory %s", dir)
+	}
+	return f, nil
+}
+
 // Start binds the listeners and starts serving. It returns once everything is
-// bound. Control binds first, then Peer, then WebDAV, so a second daemon on
-// the same configuration fails on the Control port before touching anything.
+// bound. A lock on the config directory comes first, so a second daemon on
+// it fails before touching jobs or parts; then Control binds, then Peer, then WebDAV.
 func Start(ctx context.Context, o Options) (*Daemon, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -85,6 +109,10 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
+	lock, err := acquireLock(dir)
+	if err != nil {
+		return nil, err
+	}
 	pick := func(override, configured string) string {
 		if override != "" {
 			return override
@@ -92,10 +120,11 @@ func Start(ctx context.Context, o Options) (*Daemon, error) {
 		return configured
 	}
 
-	d := &Daemon{dir: dir, stopped: make(chan struct{})}
+	d := &Daemon{dir: dir, lock: lock, stopped: make(chan struct{})}
 	ok := false
 	defer func() {
 		if !ok {
+			lock.Close()
 			for _, ln := range d.lns {
 				if ln != nil {
 					ln.Close()
@@ -275,6 +304,7 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		d.wg.Wait()
 		d.n.Close()
 		control.RemoveRuntime(d.dir, d.rt)
+		d.lock.Close() // last: only now may another daemon take over
 	})
 	select {
 	case <-d.stopped:

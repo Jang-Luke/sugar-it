@@ -1,12 +1,14 @@
 package daemon_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -254,16 +256,19 @@ func TestSecondDaemonRefused(t *testing.T) {
 	first := start(t, o)
 	before, _ := os.ReadFile(filepath.Join(dir, "runtime.json"))
 
-	o2 := o
-	o2.ControlAddr = first.ControlAddr() // what the same config would give it
-	o2.ListenAddr, o2.DAVAddr = "127.0.0.1:0", "127.0.0.1:0"
-	second, err := daemon.Start(bg, o2)
-	if err == nil {
-		stop(t, second)
-		t.Fatal("second daemon started")
-	}
-	if !strings.Contains(err.Error(), first.ControlAddr()) {
-		t.Fatalf("error %q does not name the control address", err)
+	// Same addresses, and addresses that differ: both are refused by the lock.
+	for name, o2 := range map[string]daemon.Options{
+		"same":      o,
+		"different": {ConfigDir: dir, ListenAddr: "127.0.0.1:0", ControlAddr: "127.0.0.1:0", DAVAddr: "127.0.0.1:0"},
+	} {
+		second, err := daemon.Start(bg, o2)
+		if err == nil {
+			stop(t, second)
+			t.Fatalf("%s: second daemon started", name)
+		}
+		if !strings.Contains(err.Error(), dir) {
+			t.Fatalf("%s: error %q does not name the config directory", name, err)
+		}
 	}
 	after, _ := os.ReadFile(filepath.Join(dir, "runtime.json"))
 	if string(before) != string(after) {
@@ -276,10 +281,128 @@ func TestSecondDaemonRefused(t *testing.T) {
 	if _, err := c.Status(bg); err != nil {
 		t.Fatalf("first daemon is gone: %v", err)
 	}
-	// The first daemon keeps its other listeners.
 	if !dialable(first.PeerAddr()) || !dialable(first.DAVAddr()) {
 		t.Fatal("first daemon lost a listener")
 	}
+}
+
+func TestSecondDaemonLeavesJobsAndPartsAlone(t *testing.T) {
+	_, b, adir, bdir, ao, _ := twoDaemons(t)
+	addShare(t, bdir, "s", map[string]string{"x": "still mine"})
+	dst := addShare(t, adir, "d", nil)
+	ac, _ := control.Discover(adir)
+	stop(t, b)
+	j, err := ac.StartJob(bg, control.TransferRequest{Op: "copy", Src: "b:s/x", Dst: "local:d/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "waiting_peer", func() bool {
+		j, err := ac.Job(bg, j.Host, j.ID)
+		return err == nil && j.State == transfer.StateWaitingPeer
+	})
+	// A stale part the second daemon's GC would delete if it ran.
+	partDir := filepath.Join(dst, vfs.PartDir)
+	os.MkdirAll(partDir, 0o700)
+	stale := filepath.Join(partDir, "orphan.part")
+	os.WriteFile(stale, []byte("x"), 0o600)
+	old := time.Now().Add(-9 * 24 * time.Hour)
+	os.Chtimes(stale, old, old)
+
+	o2 := daemon.Options{ConfigDir: adir, ListenAddr: "127.0.0.1:0", ControlAddr: "127.0.0.1:0", DAVAddr: "127.0.0.1:0"}
+	if d, err := daemon.Start(bg, o2); err == nil {
+		stop(t, d)
+		t.Fatal("second daemon started")
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("the refused daemon ran part cleanup: %v", err)
+	}
+	if got, err := ac.Job(bg, j.Host, j.ID); err != nil || got.State != transfer.StateWaitingPeer {
+		t.Fatalf("first daemon's job: %+v %v", got, err)
+	}
+	// The first daemon still finishes its job when B returns.
+	start(t, daemon.Options{ConfigDir: bdir})
+	eventually(t, "done", func() bool {
+		got, err := ac.Job(bg, j.Host, j.ID)
+		return err == nil && got.State == transfer.StateDone
+	})
+	_ = ao
+}
+
+func TestLockReleasedAfterShutdown(t *testing.T) {
+	_, o := setup(t, "alpha")
+	d := start(t, o)
+	stop(t, d)
+	d2, err := daemon.Start(bg, daemon.Options{ConfigDir: o.ConfigDir, ListenAddr: "127.0.0.1:0", ControlAddr: "127.0.0.1:0", DAVAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("restart after Shutdown: %v", err)
+	}
+	stop(t, d2)
+}
+
+func TestLockFailedStartReleasesIt(t *testing.T) {
+	_, o := setup(t, "alpha")
+	busy, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer busy.Close()
+	bad := o
+	bad.DAVAddr = busy.Addr().String()
+	if _, err := daemon.Start(bg, bad); err == nil {
+		t.Fatal("expected a bind error")
+	}
+	start(t, o) // the lock did not leak
+}
+
+// TestHelperDaemon is not a test: the child process of
+// TestLockReleasedAfterKill runs a daemon in it.
+func TestHelperDaemon(t *testing.T) {
+	dir := os.Getenv("SUGAR_IT_HELPER_DIR")
+	if dir == "" {
+		t.Skip("helper process only")
+	}
+	if _, err := daemon.Start(bg, daemon.Options{ConfigDir: dir}); err != nil {
+		fmt.Println("ERR", err)
+		os.Exit(2)
+	}
+	fmt.Println("READY")
+	select {}
+}
+
+func TestLockReleasedAfterKill(t *testing.T) {
+	dir, o := setup(t, "alpha")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperDaemon$")
+	cmd.Env = append(os.Environ(), "SUGAR_IT_HELPER_DIR="+dir)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sc := bufio.NewScanner(out)
+	ready := false
+	for sc.Scan() {
+		if sc.Text() == "READY" {
+			ready = true
+			break
+		}
+		if strings.HasPrefix(sc.Text(), "ERR") {
+			t.Fatal(sc.Text())
+		}
+	}
+	if !ready {
+		t.Fatal("helper daemon did not start")
+	}
+	if d, err := daemon.Start(bg, daemon.Options{ConfigDir: dir, ListenAddr: "127.0.0.1:0", ControlAddr: "127.0.0.1:0", DAVAddr: "127.0.0.1:0"}); err == nil {
+		stop(t, d)
+		t.Fatal("started next to a live daemon in another process")
+	}
+	cmd.Process.Kill()
+	cmd.Wait()
+	// The dead process left runtime.json behind; the lock is gone anyway.
+	d := start(t, o)
+	if _, err := control.Discover(dir); err != nil {
+		t.Fatal(err)
+	}
+	_ = d
 }
 
 func TestContextCancelStopsDaemon(t *testing.T) {
