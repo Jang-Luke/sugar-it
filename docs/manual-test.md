@@ -123,7 +123,9 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
    "새 폴더" work, and a duplicate name shows the "exists" message.
 8. Stop host B (`kill`): the right pane shows "호스트가 오프라인입니다." with a
    "재시도" button and stays selectable; after restarting B, "재시도" lists it.
-9. Hosts tab, remove host B: the dialog shows its name; confirm removes it.
+9. Hosts tab, "이 컴퓨터" card: rename this host. The new name shows at once and
+   host B sees it after gossip; an invalid name shows the error banner.
+   Then remove host B: the dialog shows its name; confirm removes it.
 10. Mount (Hosts tab). Linux: needs `gvfs-backends` and a session bus; the
     result box shows `gio`'s output. macOS: Finder asks for credentials, use
     "토큰 보기" for the password (a native dialog; the token appears nowhere
@@ -133,5 +135,6 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
 11. "서비스 설치" installs the per-user service (Linux: `systemctl --user status
     sugar-it`). While the app itself runs the daemon, the service fails to take
     the config-directory lock and retries every 5 seconds until the app closes.
+    "서비스 제거" asks first, then stops and removes the service.
 12. Kill the in-process daemon's port by starting another process on it before
     launch: the window shows the start error banner instead of crashing.

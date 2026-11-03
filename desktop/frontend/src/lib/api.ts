@@ -96,6 +96,7 @@ export interface Api {
   invite(ttlSeconds: number): Promise<string>
   joinPeer(invite: string): Promise<PeerStatus>
   removePeer(name: string): Promise<void>
+  renameSelf(newName: string): Promise<void>
   listShares(peer: string): Promise<ShareInfo[]>
   addShare(name: string, path: string, readOnly: boolean): Promise<void>
   removeShare(name: string): Promise<void>
@@ -113,6 +114,7 @@ export interface Api {
   /** Opens a native dialog with the token; the token never reaches this code. */
   showMountToken(title: string, message: string): Promise<void>
   installService(): Promise<ServiceResult>
+  uninstallService(): Promise<ServiceResult>
 }
 
 /** Binding errors are JSON {"code","message"}; anything else is an internal error. */
@@ -147,6 +149,7 @@ export function wailsApi(): Api {
     invite: (ttl) => c('Invite', ttl),
     joinPeer: (inv) => c('JoinPeer', inv),
     removePeer: (n) => c('RemovePeer', n),
+    renameSelf: (n) => c('RenameSelf', n),
     listShares: (p) => c('ListShares', p),
     addShare: (n, p, ro) => c('AddShare', n, p, ro),
     removeShare: (n) => c('RemoveShare', n),
@@ -163,5 +166,6 @@ export function wailsApi(): Api {
     unmount: (d) => c('Unmount', d),
     showMountToken: (t, m) => c('ShowMountToken', t, m),
     installService: () => c('InstallService'),
+    uninstallService: () => c('UninstallService'),
   }
 }

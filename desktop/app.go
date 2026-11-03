@@ -38,6 +38,7 @@ type Backend interface {
 	Invite(ctx context.Context, ttl time.Duration) (string, error)
 	JoinPeer(ctx context.Context, invite string) (node.PeerStatus, error)
 	RemovePeer(ctx context.Context, name string) error
+	RenameSelf(ctx context.Context, newName string) error
 	ListShares(ctx context.Context, peer string) ([]peerapi.ShareInfo, error)
 	AddShare(ctx context.Context, s shares.Spec) error
 	RemoveShare(ctx context.Context, name string) error
@@ -60,13 +61,14 @@ type App struct {
 	opts      daemon.Options // template for the in-process daemon; tests bind free ports
 
 	// Seams for tests.
-	discover func(dir string) (Backend, error)
-	mountRun func(ctx context.Context, p mount.Plan, out io.Writer) error
-	svcRun   func(ctx context.Context, u service.Unit, out io.Writer) error
-	dialog   func(ctx context.Context, title, message string) error
-	goos     string
-	home     string // "" means the user's home directory
-	exeDir   string // where to look for the sugar-it command; "" means beside this program
+	discover     func(dir string) (Backend, error)
+	mountRun     func(ctx context.Context, p mount.Plan, out io.Writer) error
+	svcRun       func(ctx context.Context, u service.Unit, out io.Writer) error
+	svcUninstall func(ctx context.Context, u service.Unit, out io.Writer) error
+	dialog       func(ctx context.Context, title, message string) error
+	goos         string
+	home         string // "" means the user's home directory
+	exeDir       string // where to look for the sugar-it command; "" means beside this program
 
 	mu       sync.Mutex
 	ctx      context.Context
@@ -87,8 +89,9 @@ func NewApp(configDir string) *App {
 			}
 			return c, nil
 		},
-		mountRun: mount.Run,
-		svcRun:   service.Install,
+		mountRun:     mount.Run,
+		svcRun:       service.Install,
+		svcUninstall: service.Uninstall,
 		dialog: func(ctx context.Context, title, message string) error {
 			_, err := wailsrt.MessageDialog(ctx, wailsrt.MessageDialogOptions{Type: wailsrt.InfoDialog, Title: title, Message: message})
 			return err
@@ -266,6 +269,11 @@ func (a *App) RemovePeer(name string) error {
 	return do(a, func(ctx context.Context, b Backend) error { return b.RemovePeer(ctx, name) })
 }
 
+// RenameSelf changes this host's name; only the host itself can.
+func (a *App) RenameSelf(newName string) error {
+	return do(a, func(ctx context.Context, b Backend) error { return b.RenameSelf(ctx, newName) })
+}
+
 func (a *App) ListShares(peer string) ([]peerapi.ShareInfo, error) {
 	return call(a, callTimeout, func(ctx context.Context, b Backend) ([]peerapi.ShareInfo, error) {
 		return b.ListShares(ctx, peer)
@@ -421,7 +429,7 @@ func (a *App) ShowMountToken(title, message string) error {
 	return wrapErr(a.dialog(ctx, title, strings.ReplaceAll(message, tokenMark, b.Token())))
 }
 
-// ServiceResult is the output of the install commands.
+// ServiceResult is the output of the install or uninstall commands.
 type ServiceResult struct{ Output string }
 
 func cliName() string {
@@ -477,5 +485,25 @@ func (a *App) InstallService() (ServiceResult, error) {
 	defer cancel()
 	var out bytes.Buffer
 	err = a.svcRun(ctx, u, &out)
+	return ServiceResult{Output: out.String()}, wrapErr(err)
+}
+
+// UninstallService stops and removes the per-user background service.
+func (a *App) UninstallService() (ServiceResult, error) {
+	home := a.home
+	if home == "" {
+		var err error
+		if home, err = os.UserHomeDir(); err != nil {
+			return ServiceResult{}, wrapErr(err)
+		}
+	}
+	u, err := service.UninstallPlan(a.goos, home)
+	if err != nil {
+		return ServiceResult{}, wrapErr(vfs.E(vfs.CodeInvalidRequest, "%v", err))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), mountTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	err = a.svcUninstall(ctx, u, &out)
 	return ServiceResult{Output: out.String()}, wrapErr(err)
 }

@@ -25,7 +25,14 @@
   let drive = ''
   let mountResult: MountResult | null = null
   let serviceOutput = ''
-  let confirm: null | { kind: 'peer' | 'share'; name: string } = null
+  let newName = ''
+  let confirm: null | { kind: 'peer' | 'share' | 'service'; name: string } = null
+
+  $: dialog = confirm?.kind === 'peer'
+    ? { title: ko.hosts.removeTitle, message: ko.hosts.removeMessage, label: ko.hosts.removeConfirm }
+    : confirm?.kind === 'share'
+      ? { title: ko.hosts.removeShareTitle, message: ko.hosts.removeShareMessage, label: ko.hosts.removeShareConfirm }
+      : { title: ko.hosts.serviceUninstallTitle, message: ko.hosts.serviceUninstallMessage, label: ko.hosts.serviceUninstallConfirm }
 
   $: peers = status?.Peers ?? []
   $: platform = state?.Platform ?? ''
@@ -52,6 +59,19 @@
     }
   }
   loadShares()
+
+  async function renameSelf() {
+    const name = newName.trim()
+    const ok = await run(async () => {
+      await api.renameSelf(name)
+      return true
+    })
+    if (ok) {
+      info = ko.hosts.renamed(name)
+      newName = ''
+      dispatch('changed')
+    }
+  }
 
   async function makeInvite() {
     const v = await run(() => api.invite(0))
@@ -97,6 +117,15 @@
   async function doConfirm() {
     if (!confirm) return
     const { kind, name } = confirm
+    if (kind === 'service') {
+      const r = await run(() => api.uninstallService())
+      confirm = null
+      if (r) {
+        serviceOutput = r.Output
+        info = ko.hosts.serviceUninstalled
+      }
+      return
+    }
     const ok = await run(async () => {
       if (kind === 'peer') await api.removePeer(name)
       else await api.removeShare(name)
@@ -157,6 +186,10 @@
         <span class="muted">{ko.hosts.hostName}</span><strong>{status.Name}</strong>
         <span class="muted">{ko.hosts.version}</span><span>{status.Version}</span>
         <span class="muted">{ko.hosts.hostId}</span><span class="mono">{status.ID}</span>
+      </div>
+      <div class="row rename">
+        <input placeholder={ko.hosts.renameLabel} title={ko.hosts.renameHint} bind:value={newName} />
+        <button disabled={busy || newName.trim() === ''} on:click={renameSelf}>{ko.hosts.renameButton}</button>
       </div>
     {/if}
   </div>
@@ -249,17 +282,20 @@
     <h2>{ko.hosts.serviceTitle}</h2>
     <p class="muted">{ko.hosts.serviceHelp}</p>
     {#if state?.InProcess}<p class="muted">{ko.hosts.serviceWaitsForApp}</p>{/if}
-    <button disabled={busy} on:click={installService}>{ko.hosts.serviceInstall}</button>
+    <div class="row">
+      <button disabled={busy} on:click={installService}>{ko.hosts.serviceInstall}</button>
+      <button class="danger" disabled={busy} on:click={() => (confirm = { kind: 'service', name: 'sugar-it' })}>{ko.hosts.serviceUninstall}</button>
+    </div>
     {#if serviceOutput}<pre class="mono out">{serviceOutput}</pre>{/if}
   </div>
 </div>
 
 {#if confirm}
   <Dialog
-    title={confirm.kind === 'peer' ? ko.hosts.removeTitle : ko.hosts.removeShareTitle}
-    message={confirm.kind === 'peer' ? ko.hosts.removeMessage : ko.hosts.removeShareMessage}
+    title={dialog.title}
+    message={dialog.message}
     names={[confirm.name]}
-    confirmLabel={confirm.kind === 'peer' ? ko.hosts.removeConfirm : ko.hosts.removeShareConfirm}
+    confirmLabel={dialog.label}
     danger
     {busy}
     on:confirm={doConfirm}
@@ -276,6 +312,6 @@
   .grow { flex: 1; min-width: 0; }
   .sub { margin-top: 16px; }
   .wide { width: 100%; display: block; margin: 6px 0; }
-  .addshare { margin-top: 10px; }
+  .addshare, .rename { margin-top: 10px; }
   .out { background: var(--bg); padding: 8px; border-radius: 6px; white-space: pre-wrap; margin: 4px 0; }
 </style>

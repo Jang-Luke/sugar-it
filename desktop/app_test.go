@@ -416,3 +416,48 @@ func TestDaemonArgumentRunsTheCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestRenameSelfBinding(t *testing.T) {
+	a := newApp(t, t.TempDir())
+	a.startup(context.Background())
+	defer a.shutdown(context.Background())
+	if err := a.RenameSelf("new-name"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := a.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Name != "new-name" {
+		t.Errorf("name = %q", st.Name)
+	}
+	if code, _ := parseErr(t, a.RenameSelf("Not Valid")); code != vfs.CodeInvalidRequest {
+		t.Errorf("code = %s", code)
+	}
+}
+
+func TestUninstallServicePlan(t *testing.T) {
+	a := newApp(t, t.TempDir())
+	a.goos = "linux"
+	a.home = t.TempDir()
+	var got service.Unit
+	a.svcUninstall = func(_ context.Context, u service.Unit, out io.Writer) error {
+		got = u
+		out.Write([]byte("removed\n"))
+		return nil
+	}
+	res, err := a.UninstallService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(a.home, ".config", "systemd", "user", "sugar-it.service"); got.Path != want {
+		t.Errorf("path = %q, want %q", got.Path, want)
+	}
+	if !strings.Contains(res.Output, "removed") {
+		t.Errorf("result = %+v", res)
+	}
+	a.goos = "plan9"
+	if code, _ := parseErr(t, func() error { _, err := a.UninstallService(); return err }()); code != vfs.CodeInvalidRequest {
+		t.Errorf("code = %s", code)
+	}
+}
