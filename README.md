@@ -17,14 +17,14 @@ There is no published release yet. Build from source (Go 1.27 or newer):
 go build -o sugar-it ./cmd/sugar-it
 ```
 
-Tagged releases are meant to provide, through GoReleaser:
+Tagged releases are meant to provide the following. The first two items are built by GoReleaser (`release.yml`, job `cli`); the desktop assets are built by a separate `wails build` job (`release.yml`, job `desktop`):
 
 - `sugar-it` archives for linux, darwin and windows on amd64 and arm64
   (`.tar.gz`, `.zip` on Windows) and a `checksums.txt`.
 - `.deb` and `.rpm` packages for Linux. They install `/usr/bin/sugar-it` only:
   they do not enable or start any service. Run `sugar-it service install` as
   your own user when you want the background service.
-- `sugar-it-desktop` (Wails GUI): a Linux binary, a macOS universal `.app`
+- `sugar-it-desktop` (Wails GUI, not part of GoReleaser or `checksums.txt`): a Linux binary, a macOS universal `.app`
   (zipped) and a Windows NSIS installer.
 
 Build the desktop app yourself (Linux needs `libgtk-3-dev` and
@@ -47,8 +47,9 @@ Nothing is code signed or notarized. Expect warnings:
 - Windows: SmartScreen shows "Windows protected your PC" for the installer and
   `sugar-it.exe`. Choose "More info", then "Run anyway".
 
-Check the download against `checksums.txt` instead of trusting the warning
-dialog either way.
+Check the `sugar-it` archives and packages against `checksums.txt` instead of
+trusting the warning dialog either way. `checksums.txt` does not cover the
+`sugar-it-desktop` assets, which have no checksum file.
 
 ## Firewall
 
@@ -138,11 +139,16 @@ See [docs/manual-test.md](docs/manual-test.md) for the step-by-step checks.
 Verified on the Linux build host:
 
 - Unit and integration tests and the three-daemon e2e suite
-  (`go test -race ./...`), cross-compilation for windows and darwin with
+  (`go test -race ./...`; in one full run `TestGracefulShutdownKeepsJobs`
+  timed out once while other commands ran at the same time, and it passed when
+  run alone and in the second full run), cross-compilation for windows and darwin with
   `CGO_ENABLED=0`, and the two-host quickstart above.
 
 **Not verified**:
 
+- The GoReleaser snapshot, the six archives, the deb and rpm packages, the
+  nfpm contents, and the docker `dpkg -i` install check have never been run.
+  `.goreleaser.yaml` has never been parsed by GoReleaser.
 - Mounting on macOS and on Windows, and on Linux (the build host has no
   `gvfs-backends`).
 - The desktop app walk-through (no display on the build host). Its Go and
