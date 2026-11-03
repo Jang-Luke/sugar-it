@@ -2,6 +2,7 @@ package mount_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -43,22 +44,91 @@ func TestPlanDarwin(t *testing.T) {
 	}
 }
 
-func TestPlanWindowsPrompt(t *testing.T) {
+func TestPlanWindowsConnect(t *testing.T) {
 	ok := mount.WinLimits{Known: true, BasicAuthLevel: 2, FileSizeLimit: 4294967295}
 	p, err := mount.MountPlan("windows", dav, token, "Z:", ok)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"net", "use", "Z:", "http://127.0.0.1:7445/", "/user:sugar-it", "*"}
-	if strings.Join(p.Argv, " ") != strings.Join(want, " ") {
-		t.Fatalf("argv %v, want %v", p.Argv, want)
+	if len(p.Argv) != 0 || p.Stdin != "" {
+		t.Fatalf("windows runs no command: %v %q", p.Argv, p.Stdin)
+	}
+	w := p.Windows
+	if w == nil || w.RemoteName != `\\127.0.0.1@7445\DavWWWRoot` || w.User != "sugar-it" || w.Drive != "Z:" {
+		t.Fatalf("connect %+v", w)
 	}
 	p, err = mount.MountPlan("windows", dav, token, "", ok)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || p.Windows == nil || p.Windows.Drive != "" {
+		t.Fatalf("auto drive: %+v %v", p.Windows, err)
 	}
-	if p.Argv[2] != "*" || p.Argv[len(p.Argv)-1] != "*" {
-		t.Fatalf("auto drive: %v", p.Argv)
+	if _, err := mount.MountPlan("windows", "[::1]:7445", token, "", ok); err == nil {
+		t.Fatal("an IPv6 literal has no WebDAV UNC form")
+	}
+}
+
+func TestConnectPassesArgsAndReturnsDrive(t *testing.T) {
+	ok := mount.WinLimits{Known: true, BasicAuthLevel: 2, FileSizeLimit: 4294967295}
+	p, _ := mount.MountPlan("windows", dav, token, "", ok)
+	var got mount.ConnectArgs
+	conn := func(a mount.ConnectArgs) (string, error) { got = a; return "Y:", nil }
+	var out strings.Builder
+	drive, err := mount.RunMount(context.Background(), &fakeRunner{}, conn, p, token, &out)
+	if err != nil || drive != "Y:" {
+		t.Fatalf("%q %v", drive, err)
+	}
+	if got.Password != token || got.User != "sugar-it" || got.RemoteName != p.Windows.RemoteName || got.Drive != "" {
+		t.Fatalf("args %+v", got)
+	}
+	if !strings.Contains(out.String(), "Y:") || strings.Contains(out.String(), token) {
+		t.Fatalf("output %q", out.String())
+	}
+}
+
+func TestConnectErrorsNeverCarryToken(t *testing.T) {
+	ok := mount.WinLimits{Known: true, BasicAuthLevel: 2, FileSizeLimit: 4294967295}
+	p, _ := mount.MountPlan("windows", dav, token, "Z:", ok)
+	conn := func(a mount.ConnectArgs) (string, error) { return "", errors.New("provider said " + a.Password) }
+	var out strings.Builder
+	_, err := mount.RunMount(context.Background(), &fakeRunner{}, conn, p, token, &out)
+	if err == nil || strings.Contains(err.Error(), token) || strings.Contains(out.String(), token) {
+		t.Fatalf("err %v out %q", err, out.String())
+	}
+}
+
+func TestWinErrorMessages(t *testing.T) {
+	cases := map[uint32]string{
+		85:   "already in use",
+		5:    "credentials",
+		86:   "credentials",
+		1326: "credentials",
+		1244: "logon session",
+		53:   "WebClient",
+		67:   "WebClient",
+		1203: "WebClient",
+		1058: "WebClient",
+		1068: "WebClient",
+		259:  "free drive letter",
+		1219: "different credentials",
+	}
+	for code, want := range cases {
+		err := mount.WinError(code)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("code %d: %v, want %q", code, err, want)
+		}
+	}
+	if err := mount.WinError(9999); err == nil || !strings.Contains(err.Error(), "9999") {
+		t.Errorf("unknown code: %v", err)
+	}
+}
+
+func TestBasicAuthBlockedError(t *testing.T) {
+	_, err := mount.MountPlan("windows", dav, token, "Z:", mount.WinLimits{Known: true, BasicAuthLevel: 1, FileSizeLimit: 4294967295})
+	var be *mount.BasicAuthBlockedError
+	if !errors.As(err, &be) || be.Level != 1 || len(be.Commands) != 2 || !strings.HasPrefix(be.Commands[0], "reg add ") {
+		t.Fatalf("%#v", err)
+	}
+	if !strings.Contains(err.Error(), "reg add") {
+		t.Fatalf("CLI text must keep the commands: %v", err)
 	}
 }
 
@@ -136,7 +206,7 @@ func TestUnmountPlan(t *testing.T) {
 		t.Fatalf("%v %v", p.Argv, err)
 	}
 	p, err = mount.UnmountPlan("windows", dav, "Z:")
-	if err != nil || strings.Join(p.Argv, " ") != "net use Z: /delete" {
+	if err != nil || strings.Join(p.Argv, " ") != "net use Z: /delete /y" {
 		t.Fatalf("%v %v", p.Argv, err)
 	}
 	if _, err := mount.UnmountPlan("windows", dav, ""); err == nil {

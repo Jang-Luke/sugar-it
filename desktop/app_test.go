@@ -272,6 +272,11 @@ func TestTokenStaysInTheApp(t *testing.T) {
 		return nil
 	}
 	a.dialog = func(_ context.Context, title, msg string) error { shown = append(shown, msg); return nil }
+	var winArgs []mount.ConnectArgs
+	a.winConnect = func(c mount.ConnectArgs) (string, error) {
+		winArgs = append(winArgs, c)
+		return "Y:", nil
+	}
 
 	var all []any
 	st, _ := a.Status()
@@ -285,6 +290,15 @@ func TestTokenStaysInTheApp(t *testing.T) {
 			t.Fatalf("%s: %v", goos, err)
 		}
 		all = append(all, res)
+		if goos == "windows" {
+			if len(calls) != 0 || len(winArgs) != 1 || winArgs[0].Password != token || res.Drive != "Y:" {
+				t.Fatalf("windows: runs %d, connects %+v, drive %q", len(calls), winArgs, res.Drive)
+			}
+			if res.NeedsToken {
+				t.Error("windows needs no token dialog")
+			}
+			continue
+		}
 		if len(calls) != 1 {
 			t.Fatalf("%s: %d mount runs", goos, len(calls))
 		}
@@ -298,7 +312,7 @@ func TestTokenStaysInTheApp(t *testing.T) {
 		if goos != "linux" && p.Stdin != "" {
 			t.Errorf("%s: stdin set", goos)
 		}
-		if res.NeedsToken != (goos != "linux") {
+		if res.NeedsToken != (goos == "darwin") {
 			t.Errorf("%s: NeedsToken = %v", goos, res.NeedsToken)
 		}
 	}
@@ -315,10 +329,12 @@ func TestTokenStaysInTheApp(t *testing.T) {
 	if len(shown) != 1 || !strings.Contains(shown[0], token) {
 		t.Errorf("dialog = %q", shown)
 	}
-	// Not offered where the token goes over stdin.
-	a.goos = "linux"
-	if err := a.ShowMountToken("t", "토큰: {token}"); err == nil {
-		t.Error("token dialog opened on linux")
+	// Not offered where the token goes to the command or the API itself.
+	for _, goos := range []string{"linux", "windows"} {
+		a.goos = goos
+		if err := a.ShowMountToken("t", "토큰: {token}"); err == nil {
+			t.Errorf("token dialog opened on %s", goos)
+		}
 	}
 }
 
@@ -459,5 +475,41 @@ func TestUninstallServicePlan(t *testing.T) {
 	a.goos = "plan9"
 	if code, _ := parseErr(t, func() error { _, err := a.UninstallService(); return err }()); code != vfs.CodeInvalidRequest {
 		t.Errorf("code = %s", code)
+	}
+}
+
+func TestMountBlockedByBasicAuthIsAResult(t *testing.T) {
+	dir := t.TempDir()
+	a := newApp(t, dir)
+	a.startup(context.Background())
+	defer a.shutdown(context.Background())
+	a.goos = "windows"
+	a.readLimits = func() mount.WinLimits {
+		return mount.WinLimits{Known: true, BasicAuthLevel: 1, FileSizeLimit: 4294967295}
+	}
+	a.winConnect = func(mount.ConnectArgs) (string, error) { t.Fatal("must not connect"); return "", nil }
+	res, err := a.Mount("")
+	if err != nil {
+		t.Fatalf("blocked is a result, not an error: %v", err)
+	}
+	if !res.Blocked || len(res.AdminCommands) != 2 || !strings.HasPrefix(res.AdminCommands[0], "reg add ") {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestMountConnectFailureStaysAnError(t *testing.T) {
+	dir := t.TempDir()
+	a := newApp(t, dir)
+	a.startup(context.Background())
+	defer a.shutdown(context.Background())
+	token, _ := config.ControlToken(dir)
+	a.goos = "windows"
+	a.readLimits = func() mount.WinLimits {
+		return mount.WinLimits{Known: true, BasicAuthLevel: 2, FileSizeLimit: 4294967295}
+	}
+	a.winConnect = func(c mount.ConnectArgs) (string, error) { return "", errors.New("boom " + c.Password) }
+	res, err := a.Mount("Z:")
+	if err == nil || res.Blocked || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("%+v %v", res, err)
 	}
 }

@@ -57,6 +57,7 @@ type env struct {
 	configDir      string
 	json           bool
 	mountRunner    mount.Runner
+	mountConnect   mount.Connector // nil: the real Windows API
 	svcRunner      service.Runner
 }
 

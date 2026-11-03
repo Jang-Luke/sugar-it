@@ -132,8 +132,8 @@ Control API와 WebDAV는 루프백 주소에서만 연다. 설정이나 옵션�
   - 원본이나 대상이 디렉터리인 덮어쓰기는 412로 거부한다. 먼저 대상을 삭제해야 한다.
   - `Overwrite: F`는 대상이 있으면 412이다. WebDAV 잠금 검사는 그대로 적용된다.
   - 교체된 파일은 원본의 mtime을 유지하고 권한 비트는 유지하지 않는다.
-- `sugar-it mount`는 OS별 마운트 명령을 실행하며, **토큰을 명령행 인자에 넣지 않는다.**
-- **Windows 제약:** WebClient의 기본 설정은 HTTP Basic을 막고(`BasicAuthLevel`) 파일 크기를 약 50MB로 제한한다(`FileSizeLimitInBytes`). `sugar-it mount`가 이 값을 읽어 부족하면 관리자 권한으로 실행할 명령을 안내한다. 이 레지스트리 값의 상한으로 약 4GB가 넘는 파일은 Windows 마운트에서 다룰 수 없으므로 앱을 쓴다.
+- `sugar-it mount`는 OS별로 마운트하며, **토큰을 명령행 인자에 넣지 않는다.** Linux는 `gio`의 표준 입력으로, macOS는 Finder의 암호 입력창으로 전달한다. Windows는 콘솔 없이도 동작하도록 `mpr.dll`의 `WNetUseConnectionW`를 직접 호출하고(사용자 `sugar-it`, 암호는 함수 인자로만 전달, 원격 이름 `\\127.0.0.1@7445\DavWWWRoot`), 드라이브를 지정하지 않으면 Windows가 고른 드라이브를 알려 준다. CLI와 데스크톱 앱이 같은 경로를 쓴다. 해제는 `net use Z: /delete /y`이다.
+- **Windows 제약:** WebClient의 기본 설정은 HTTP Basic을 막고(`BasicAuthLevel`) 파일 크기를 약 50MB로 제한한다(`FileSizeLimitInBytes`). `sugar-it mount`가 이 값을 읽어 부족하면 관리자 권한으로 실행할 명령을 안내한다(데스크톱 앱에서는 오류가 아니라 안내로 표시한다). 이 레지스트리 값의 상한으로 약 4GB가 넘는 파일은 Windows 마운트에서 다룰 수 없으므로 앱을 쓴다.
 
 ## 9. CLI
 

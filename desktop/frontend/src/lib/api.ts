@@ -80,6 +80,9 @@ export interface MountResult {
   Notes: string[] | null
   Output: string
   NeedsToken: boolean
+  Drive: string
+  Blocked: boolean
+  AdminCommands: string[] | null
 }
 
 export interface ServiceResult {

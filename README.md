@@ -182,11 +182,14 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer
   scripts, and that binary prints its version. The rpm packages were built but
   never unpacked or installed, and the macOS binaries were built but never run.
-- Mounting on macOS and on Linux (the build host has no `gvfs-backends`), and a
-  usable mount on Windows. Over SSH, `sugar-it mount` has no console for the
-  password prompt and fails with system error 1244, and a `net use` given the
-  token connected but showed the drive as unavailable, which may come from the
-  SSH logon. A mount from a desktop session has not been tried.
+- Mounting on macOS and on Linux (the build host has no `gvfs-backends`), and
+  any mount on Windows. The earlier `net use ... *` mount needed a console for
+  the password prompt and failed over SSH with system error 1244. It was
+  replaced by a direct `WNetUseConnectionW` call (user `sugar-it`, the token as
+  the password argument, remote name `\\127.0.0.1@7445\DavWWWRoot`, no
+  prompt) shared by `sugar-it mount` and the desktop app. That call has not
+  been run on Windows; neither remote name form is documented for WebDAV by
+  the WNet pages.
 - `sugar-it service install` keeping working on Windows; see the Defender note
   below. Running it as a non-administrator has not been tried.
 - The desktop app walk-through (no display on the build host). Its Go and

@@ -60,14 +60,21 @@ sugar-it mount --drive Z:
 
 1. If `BasicAuthLevel` is below 2, the command stops and prints a `reg add`
    command. Run it in an administrator prompt together with
-   `net stop webclient && net start webclient`, then repeat.
+   `net stop webclient && net start webclient`, then repeat. (The desktop app
+   shows the same commands in Korean as an explanation, not as an error.)
 2. A file-size warning (`FileSizeLimitInBytes`, default about 50 MB) is only a
    note; raise it as printed to copy larger files, up to 4294967295 bytes.
-3. `net use` asks for the password: user `sugar-it`, password the token printed
-   in the terminal.
+3. No password prompt appears: the command calls `WNetUseConnectionW` (mpr.dll)
+   with the remote name `\\127.0.0.1@7445\DavWWWRoot`, user `sugar-it` and the
+   token as the password argument, and prints `Mounted on <drive>`. Not yet
+   run on Windows. Check these failures give a clear message: WebClient
+   stopped or disabled, a drive letter already in use (85), a wrong token (5,
+   86, 1326), and a session without network logon such as SSH (1244).
 4. Expected: drive `Z:` in Explorer shows the peers; copy a file in and out.
-   Without `--drive` Windows picks a free letter.
-5. `sugar-it unmount --drive Z:` disconnects it.
+   Without `--drive` Windows picks a free letter and the command reports it.
+   If this remote name form is rejected, the `http://127.0.0.1:7445/` form is
+   the alternative to try.
+5. `sugar-it unmount --drive Z:` runs `net use Z: /delete /y`.
 
 # Desktop app (`sugar-it-desktop`)
 
@@ -129,9 +136,12 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
 10. Mount (Hosts tab). Linux: needs `gvfs-backends` and a session bus; the
     result box shows `gio`'s output. macOS: Finder asks for credentials, use
     "토큰 보기" for the password (a native dialog; the token appears nowhere
-    else in the window). Windows: report whether `net use ... *` can prompt
-    for the password when started from the GUI app, which has no console. If
-    not, the mount cannot be completed from the app on Windows.
+    else in the window). Windows: no token is shown or typed; the app calls
+    `WNetUseConnectionW` itself and the result box names the assigned drive.
+    Not yet run on Windows. With `BasicAuthLevel` below 2 the card explains in
+    Korean and lists the `reg add` commands (needing an administrator prompt)
+    instead of showing an error; other failures show "마운트하지 못했습니다."
+    with the detail.
 11. "서비스 설치" installs the per-user service (Linux: `systemctl --user status
     sugar-it`). While the app itself runs the daemon, the service fails to take
     the config-directory lock and retries every 5 seconds until the app closes.

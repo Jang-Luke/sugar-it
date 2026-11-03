@@ -62,6 +62,8 @@ type App struct {
 
 	// Seams for tests.
 	discover     func(dir string) (Backend, error)
+	winConnect   mount.Connector // the WNetUseConnectionW call on Windows
+	readLimits   func() mount.WinLimits
 	mountRun     func(ctx context.Context, p mount.Plan, out io.Writer) error
 	svcRun       func(ctx context.Context, u service.Unit, out io.Writer) error
 	svcUninstall func(ctx context.Context, u service.Unit, out io.Writer) error
@@ -90,6 +92,8 @@ func NewApp(configDir string) *App {
 			return c, nil
 		},
 		mountRun:     mount.Run,
+		winConnect:   mount.DefaultConnector,
+		readLimits:   mount.ReadWinLimits,
 		svcRun:       service.Install,
 		svcUninstall: service.Uninstall,
 		dialog: func(ctx context.Context, title, message string) error {
@@ -355,7 +359,12 @@ func (a *App) PickFolder(title string) (string, error) {
 type MountResult struct {
 	Notes      []string
 	Output     string
-	NeedsToken bool // macOS and Windows ask the user to type the token: see ShowMountToken
+	NeedsToken bool   // macOS asks the user to type the token: see ShowMountToken
+	Drive      string // the drive Windows assigned
+	// Blocked: Windows refuses HTTP Basic until an administrator runs
+	// AdminCommands. It is a result, not an error: nothing is broken.
+	Blocked       bool
+	AdminCommands []string
 }
 
 // redact removes the control token from text that goes back to the front end.
@@ -370,27 +379,40 @@ func (a *App) winLimits() mount.WinLimits {
 	if a.goos != "windows" {
 		return mount.WinLimits{}
 	}
-	return mount.ReadWinLimits()
+	return a.readLimits()
+}
+
+// runnerFunc adapts the injectable mountRun to mount.Runner for plans that
+// run a command; the Windows plan never does.
+type planRunner struct {
+	a    *App
+	plan mount.Plan
+}
+
+func (r planRunner) Run(ctx context.Context, _ []string, _ string, out io.Writer) error {
+	return r.a.mountRun(ctx, r.plan, out)
 }
 
 // Mount mounts the mesh as a network drive. On Linux the token goes to the
-// command on stdin; elsewhere the OS asks the user for it (ShowMountToken).
+// command on stdin; on Windows it is an argument of WNetUseConnectionW; on
+// macOS the user types it (ShowMountToken).
 func (a *App) Mount(drive string) (MountResult, error) {
 	return call(a, mountTimeout, func(ctx context.Context, b Backend) (MountResult, error) {
 		token := b.Token()
 		plan, err := mount.MountPlan(a.goos, b.DAVAddr(), token, drive, a.winLimits())
+		var blocked *mount.BasicAuthBlockedError
+		if errors.As(err, &blocked) {
+			return MountResult{Blocked: true, AdminCommands: blocked.Commands}, nil
+		}
 		if err != nil {
 			return MountResult{}, errors.New(redact(err.Error(), token))
 		}
 		var out bytes.Buffer
-		if err := a.mountRun(ctx, plan, &out); err != nil {
+		assigned, err := mount.RunMount(ctx, planRunner{a, plan}, a.winConnect, plan, token, &out)
+		if err != nil {
 			return MountResult{Output: redact(out.String(), token)}, errors.New(redact(err.Error(), token))
 		}
-		notes := make([]string, len(plan.Notes))
-		for i, n := range plan.Notes {
-			notes[i] = strings.ReplaceAll(n, "the token printed below", "the token the app shows")
-		}
-		return MountResult{Notes: notes, Output: redact(out.String(), token), NeedsToken: plan.Stdin == ""}, nil
+		return MountResult{Notes: plan.Notes, Output: redact(out.String(), token), NeedsToken: plan.Stdin == "" && plan.Windows == nil, Drive: assigned}, nil
 	})
 }
 
@@ -408,10 +430,10 @@ func (a *App) Unmount(drive string) (MountResult, error) {
 
 // ShowMountToken shows the token in a native dialog, where "{token}" in message
 // stands for it. It is the only way the token leaves the app, and it goes to
-// the user's screen, not to the front end. Linux never needs it.
+// the user's screen, not to the front end. Only macOS needs it.
 func (a *App) ShowMountToken(title, message string) error {
-	if a.goos == "linux" {
-		return wrapErr(vfs.E(vfs.CodeInvalidRequest, "the mount command gets the token itself on this system"))
+	if a.goos != "darwin" {
+		return wrapErr(vfs.E(vfs.CodeInvalidRequest, "the mount gets the token itself on this system"))
 	}
 	b, err := a.client()
 	if err != nil {

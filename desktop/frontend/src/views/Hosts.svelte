@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
   import { ko } from '../ko'
+  import { describeMount, mountFailure, type MountView } from '../lib/mount'
   import { parseError, type Api, type ApiError, type AppState, type MountResult, type ShareInfo, type Status } from '../lib/api'
   import { errorText } from '../lib/transfers'
   import { formatTime } from '../lib/format'
@@ -24,6 +25,8 @@
   let shareRO = false
   let drive = ''
   let mountResult: MountResult | null = null
+  let mountView: MountView | null = null
+  let mountError: { heading: string; detail: string } | null = null
   let serviceOutput = ''
   let newName = ''
   let confirm: null | { kind: 'peer' | 'share' | 'service'; name: string } = null
@@ -140,15 +143,27 @@
 
   async function mount() {
     mountResult = null
-    const r = await run(() => api.mount(drive.trim()))
-    if (r) {
+    mountView = null
+    mountError = null
+    err = null
+    info = ''
+    busy = true
+    try {
+      const r = await api.mount(drive.trim())
       mountResult = r
-      info = ko.hosts.mountDone
+      mountView = describeMount(r)
+      if (mountView.kind === 'mounted') info = mountView.message
+    } catch (e) {
+      mountError = mountFailure(e)
+    } finally {
+      busy = false
     }
   }
 
   async function unmount() {
     mountResult = null
+    mountView = null
+    mountError = null
     const r = await run(() => api.unmount(drive.trim()))
     if (r) {
       mountResult = r
@@ -257,16 +272,30 @@
       {/if}
       <button class="primary" disabled={busy} on:click={mount}>{ko.hosts.mount}</button>
       <button disabled={busy} on:click={unmount}>{ko.hosts.unmount}</button>
-      {#if platform === 'darwin' || platform === 'windows'}
+      {#if platform === 'darwin'}
         <button on:click={showToken}>{ko.hosts.showToken}</button>
       {/if}
     </div>
-    {#if platform === 'darwin' || platform === 'windows'}
+    {#if platform === 'darwin'}
       <p class="muted">{ko.hosts.needsToken}</p>
+    {:else if platform === 'windows'}
+      <p class="muted">{ko.hosts.windowsMountNote}</p>
     {:else if platform === 'linux'}
       <p class="muted">{ko.hosts.linuxMountNote}</p>
     {/if}
-    {#if mountResult}
+    {#if mountError}
+      <div class="banner bad" role="alert">
+        <strong>{mountError.heading}</strong>
+        {#if mountError.detail}<pre class="mono out">{mountError.detail}</pre>{/if}
+      </div>
+    {/if}
+    {#if mountView?.kind === 'blocked'}
+      <div class="banner bad" role="alert"><strong>{ko.hosts.blockedTitle}</strong></div>
+      <p>{ko.hosts.blockedExplain}</p>
+      <pre class="mono out">{mountView.commands.join('\n')}</pre>
+      <p class="muted">{ko.hosts.blockedAdmin}</p>
+      <p class="muted">{ko.hosts.blockedRetry}</p>
+    {:else if mountResult}
       {#if mountResult.Notes?.length}
         <div class="muted">{ko.hosts.notes}</div>
         <pre class="mono out">{mountResult.Notes.join('\n')}</pre>

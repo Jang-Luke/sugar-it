@@ -21,12 +21,13 @@ func (e *env) mountCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if plan.Stdin == "" {
-				// The OS asks for the password itself; show it on the terminal
+			if plan.Stdin == "" && plan.Windows == nil {
+				// Finder asks for the password itself; show it on the terminal
 				// only, never in the command line.
 				plan.Notes = append(plan.Notes, "Token (password): "+c.Token())
 			}
-			return mount.RunWith(ctx, e.mountRunner, plan, e.stdout)
+			_, err = mount.RunMount(ctx, e.mountRunner, e.connector(), plan, c.Token(), e.stdout)
+			return err
 		}),
 	}
 	cmd.Flags().StringVar(&drive, "drive", "", "Windows drive letter such as Z: (default: any free drive)")
@@ -56,4 +57,11 @@ func (e *env) winLimits() mount.WinLimits {
 		return mount.WinLimits{}
 	}
 	return mount.ReadWinLimits()
+}
+
+func (e *env) connector() mount.Connector {
+	if e.mountConnect != nil {
+		return e.mountConnect
+	}
+	return mount.DefaultConnector
 }
