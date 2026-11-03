@@ -41,14 +41,15 @@
 ## 4. 멤버십 (풀 메시)
 
 - 한 호스트만 등록해도 모든 멤버와 연결되도록, 멤버 목록을 60초마다와 변경 즉시 가십한다.
-- `Member{ID, Name, Addrs, Generation, Removed}` 병합 규칙
-  - `Generation`이 큰 쪽이 이긴다. 시계에 의존하지 않는다.
-  - 같으면 `Removed`가 이긴다.
+- `Member{ID, Name, Addrs, Epoch, Generation, Removed}` 병합 규칙
+  - `Epoch`가 큰 쪽이 이긴다. 다음으로 `Generation`이 큰 쪽이 이긴다. 시계에 의존하지 않는다.
+  - 둘 다 같으면 `Removed`가 이긴다.
   - 둘 다 활성이면 주소를 합집합한다.
   - 자기 자신의 항목에 대한 원격 변경은 무시한다.
-- 제거는 tombstone(`Generation+1`, `Removed=true`)이다. 재등록은 새 페어링으로만 가능하며, `Generation = 기존 값 + 1`이다.
+- `Epoch`는 제거와 재페어링만 올린다. 제거는 tombstone(`Epoch+1`, `Generation+1`, `Removed=true`)이다. 재등록은 새 페어링으로만 가능하며, 초대한 쪽이 `Epoch = 기존 값 + 1`, `Generation = 기존 값 + 1`, `Removed=false`로 기록한다. 소유자의 이름·주소 변경은 `Generation`만 올리므로 어떤 `Generation`도 tombstone을 넘을 수 없다.
+- 호스트는 자기 항목의 더 높은 `Epoch`를 활성 항목(페어링 응답이나 가십)에서만 받아들이고, tombstone에서는 받아들이지 않는다. 자기 `Generation`을 올릴 때는 같은 `Epoch`의 활성 항목에서 본 가장 높은 값보다 크게 올린다.
 - 이름은 그 호스트에서만 바꿀 수 있다. 주소나 이름이 바뀌면 소유자가 자기 `Generation`을 올린다. 호스트 주소가 바뀌어도 신원은 유지된다.
-- 이름 규칙은 `[a-z0-9-]{1,32}`이고 `local`은 예약어다. 이름이 겹치면 ID 순으로 정렬해 `-2`, `-3`을 붙인 로컬 별칭을 쓴다.
+- 이름 규칙은 `[a-z0-9-]{1,32}`이고 `local`은 예약어다. 이름이 겹치면 이 호스트가 자기 이름을 먼저 갖고 나머지는 ID 순으로 정렬해 `-2`, `-3`을 붙인 로컬 별칭을 쓴다.
 - 온라인 상태는 15초마다 `GET /v1/info`로 확인한다. 연결 타임아웃은 5초이고, 저장된 주소를 차례로 시도하며 마지막 성공 주소를 먼저 쓴다.
 - 주소 자동 감지는 루프백, 링크 로컬, `docker*`, `br-*`, `veth*`, `virbr*`를 제외한다. `advertise_addrs`로 직접 지정할 수 있다.
 - 메이저 프로토콜 버전이 다른 피어는 `peer_incompatible`로 표시한다.

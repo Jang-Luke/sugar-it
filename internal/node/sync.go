@@ -44,13 +44,12 @@ func sameContent(a, b mesh.Member) bool {
 // of the inviter from a fresh pairing, which must end up active.
 func (n *Node) mergeIn(remote []mesh.Member, adopt *mesh.Member) (bool, error) {
 	remote = sanitize(remote)
-	var theirs *mesh.Member // the best active record a peer holds of this host
+	// The best active record a peer holds of this host. Tombstones of it are
+	// ignored: they never raise our epoch or generation.
+	var theirs *mesh.Member
 	for i, r := range remote {
-		if r.ID != n.id.ID {
-			continue
-		}
-		n.observeGen(r.Generation)
-		if !r.Removed && (theirs == nil || r.Generation > theirs.Generation) {
+		if r.ID == n.id.ID && !r.Removed &&
+			(theirs == nil || r.Epoch > theirs.Epoch || r.Epoch == theirs.Epoch && r.Generation > theirs.Generation) {
 			theirs = &remote[i]
 		}
 	}
@@ -60,15 +59,23 @@ func (n *Node) mergeIn(remote []mesh.Member, adopt *mesh.Member) (bool, error) {
 			if i := indexOf(merged, adopt.ID); i < 0 {
 				merged, ch = append(merged, *adopt), true
 			} else if merged[i].Removed {
+				// Paired again after our own removal of it: a new epoch.
 				merged[i] = mesh.Member{ID: adopt.ID, Name: adopt.Name, Addrs: normAddrs(append(slices.Clone(merged[i].Addrs), adopt.Addrs...)),
-					Generation: merged[i].Generation + 1}
+					Epoch: merged[i].Epoch + 1, Generation: merged[i].Generation + 1}
 				ch = true
 			}
 		}
-		// A peer holds a different record of this host at or above ours: it
-		// would win, so supersede it with the truth.
-		if i := indexOf(merged, n.id.ID); i >= 0 && theirs != nil {
+		if i := indexOf(merged, n.id.ID); i >= 0 && theirs != nil && theirs.Epoch >= merged[i].Epoch {
 			own := &merged[i]
+			if theirs.Epoch > own.Epoch {
+				// Re-paired: take the new epoch, from an active record only.
+				own.Epoch, own.Removed = theirs.Epoch, false
+				own.Generation = max(own.Generation, theirs.Generation)
+				ch = true
+			}
+			n.observeGen(theirs.Epoch, theirs.Generation)
+			// A different record of this host at or above ours would win, so
+			// supersede it with the truth (same epoch only).
 			if theirs.Generation >= own.Generation && theirs.Generation < ^uint64(0) && !sameContent(*theirs, *own) {
 				own.Generation = theirs.Generation + 1
 				ch = true
@@ -163,11 +170,11 @@ func (n *Node) gossipRound(ctx context.Context) {
 }
 
 // healthRound probes every peer with GET /v1/info.
-func (n *Node) healthRound(ctx context.Context) {
-	n.forPeers(ctx, func(ctx context.Context, m mesh.Member, cl *peerapi.Client) {
+func (n *Node) healthRound(round context.Context) {
+	n.forPeers(round, func(ctx context.Context, m mesh.Member, cl *peerapi.Client) {
 		info, err := cl.Info(ctx)
-		if ctx.Err() != nil && err != nil {
-			return // shutting down or timed out: no news
+		if round.Err() != nil && err != nil {
+			return // shutting down: no news. A per-call timeout is news: offline.
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()

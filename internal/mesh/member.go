@@ -14,6 +14,10 @@ type Member struct {
 	Addrs      []string
 	Generation uint64
 	Removed    bool
+	// Epoch counts removals and re-pairings. It outranks Generation, so an
+	// owner's later changes (which raise only Generation) can never pass a
+	// tombstone; only a new pairing can.
+	Epoch uint64
 }
 
 // ReservedName is never a valid host name; it denotes the local host.
@@ -21,8 +25,9 @@ const ReservedName = "local"
 
 // Merge folds remote into local and reports whether local changed. The
 // result is sorted by ID and does not alias either input. Rules: higher
-// Generation wins; on a tie Removed wins; two live records of equal
-// Generation union their addresses; remote changes to selfID are ignored.
+// Epoch wins, then the larger Generation; on a tie Removed wins; two live
+// records of equal Epoch and Generation union their addresses; remote changes
+// to selfID are ignored.
 func Merge(local, remote []Member, selfID string) (merged []Member, changed bool) {
 	byID := make(map[string]Member, len(local)+len(remote))
 	localByID := make(map[string]Member, len(local))
@@ -61,6 +66,10 @@ func Merge(local, remote []Member, selfID string) (merged []Member, changed bool
 
 func mergeOne(a, b Member) Member {
 	switch {
+	case a.Epoch > b.Epoch:
+		return a
+	case b.Epoch > a.Epoch:
+		return clone(b)
 	case a.Generation > b.Generation:
 		return a
 	case b.Generation > a.Generation:
@@ -86,7 +95,7 @@ func clone(m Member) Member {
 }
 
 func sameMember(a, b Member) bool {
-	if a.ID != b.ID || a.Name != b.Name || a.Generation != b.Generation || a.Removed != b.Removed {
+	if a.ID != b.ID || a.Epoch != b.Epoch || a.Name != b.Name || a.Generation != b.Generation || a.Removed != b.Removed {
 		return false
 	}
 	return slices.Equal(union(a.Addrs, nil), union(b.Addrs, nil))
@@ -102,7 +111,15 @@ func LocalNames(members []Member, selfID string) map[string]string {
 			active = append(active, m)
 		}
 	}
-	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+	// This host takes its own name first, so no other member can shadow it;
+	// the rest are allotted in ID order.
+	sort.Slice(active, func(i, j int) bool {
+		si, sj := active[i].ID == selfID, active[j].ID == selfID
+		if si != sj {
+			return si
+		}
+		return active[i].ID < active[j].ID
+	})
 
 	out := make(map[string]string, len(active))
 	used := map[string]bool{ReservedName: true}

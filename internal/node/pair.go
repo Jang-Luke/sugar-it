@@ -81,7 +81,8 @@ func (n *Node) pair(ctx context.Context, callerID string, r peerapi.PairRequest)
 	_, err := n.update(func(c *config.Config) error {
 		m := mesh.Member{ID: callerID, Name: r.Name, Addrs: normAddrs(r.Addrs), Generation: 1}
 		if i := indexOf(c.Members, callerID); i >= 0 {
-			m.Generation = c.Members[i].Generation + 1 // re-registration after removal
+			// Re-registration: a new epoch, so it outranks the tombstone.
+			m.Generation, m.Epoch = c.Members[i].Generation+1, c.Members[i].Epoch+1
 			c.Members[i] = m
 		} else {
 			c.Members = append(c.Members, m)

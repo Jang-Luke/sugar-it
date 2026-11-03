@@ -386,8 +386,8 @@ func TestOwnChangesPropagateAfterRejoin(t *testing.T) {
 	eventually(t, "c is back", func() bool { return seesOnline(a.n, c.id.ID) && seesOnline(b.n, c.id.ID) })
 	onA, _ := member(t, a, c.id.ID)
 	own, _ := member(t, c, c.id.ID)
-	if onA.Generation <= own.Generation {
-		t.Fatalf("setup: record on a (%d) should be above c's own (%d)", onA.Generation, own.Generation)
+	if onA.Epoch == 0 || own.Epoch != onA.Epoch || own.Generation < onA.Generation {
+		t.Fatalf("setup: rejoin should move c into a new epoch: on a %+v, own %+v", onA, own)
 	}
 
 	if err := c.n.RenameSelf("charlie2"); err != nil {
@@ -843,5 +843,198 @@ func TestStaleRecordOfSelfIsSuperseded(t *testing.T) {
 	a.n.Backend().SyncMembers(bg, b.id.ID, []mesh.Member{gone})
 	if again, _ := member(t, a, a.id.ID); again.Generation != after.Generation || again.Removed {
 		t.Fatalf("%+v", again)
+	}
+}
+
+// ---- removal must outrank every later owner change (Epoch) ----
+
+// syncWith makes from run one gossip exchange with to only.
+func syncWith(t *testing.T, from, to *tnode) {
+	t.Helper()
+	cl, err := from.n.Client(to.id.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cl.SyncMembers(bg, from.cfg.Get().Members)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, err := from.n.mergeIn(out, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// idleTrio pairs three nodes that only gossip when told to.
+func idleTrio(t *testing.T) (a, c, d *tnode) {
+	idle := bootOpts{idle: true}
+	a, c, d = boot(t, t.TempDir(), "alpha", idle), boot(t, t.TempDir(), "charlie", idle), boot(t, t.TempDir(), "delta", idle)
+	pair(t, a, c)
+	pair(t, a, d)
+	for range 3 {
+		for _, p := range [][2]*tnode{{a, c}, {a, d}, {c, d}, {c, a}, {d, a}, {d, c}} {
+			syncWith(t, p[0], p[1])
+		}
+	}
+	for _, tn := range []*tnode{a, c, d} {
+		if len(tn.n.Peers()) != 2 {
+			t.Fatalf("setup: %+v", tn.n.Peers())
+		}
+	}
+	return
+}
+
+func mustStayRemoved(t *testing.T, a, c *tnode) {
+	t.Helper()
+	if sees(a.n, c.id.ID) {
+		m, _ := member(t, a, c.id.ID)
+		t.Fatalf("removed host is active again: %+v", m)
+	}
+	_, err := peerapi.NewClient(c.id, a.id.ID, []string{a.addr}).Shares(bg)
+	wantCode(t, err, vfs.CodePeerUnauthorized)
+}
+
+// Case A: the removed host renames twice while a third host is out of touch.
+func TestRemovedHostCannotOutrunTombstoneByRenaming(t *testing.T) {
+	a, c, d := idleTrio(t)
+	if err := a.n.RemovePeer("charlie"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.n.RenameSelf("charlie2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.n.RenameSelf("charlie3"); err != nil {
+		t.Fatal(err)
+	}
+	syncWith(t, d, c)
+	syncWith(t, d, a)
+	syncWith(t, a, d)
+	mustStayRemoved(t, a, c)
+}
+
+// Case B: the remover lags behind a generation another host already holds.
+func TestRemovalAfterRenameGossipedElsewhere(t *testing.T) {
+	a, c, d := idleTrio(t)
+	c.n.RenameSelf("charlie2")
+	c.n.RenameSelf("charlie3")
+	syncWith(t, d, c) // d holds c at generation 3, a still at 1
+	if err := a.n.RemovePeer("charlie"); err != nil {
+		t.Fatal(err)
+	}
+	syncWith(t, a, d)
+	syncWith(t, d, a)
+	mustStayRemoved(t, a, c)
+	if p, _ := peer(d.n, c.id.ID); p.ID != "" {
+		t.Fatalf("d kept c: %+v", p)
+	}
+}
+
+// Case C: the removed host sees its own tombstone, then renames once.
+func TestOwnTombstoneIsNotCountedAsGeneration(t *testing.T) {
+	a, c, d := idleTrio(t)
+	if err := a.n.RemovePeer("charlie"); err != nil {
+		t.Fatal(err)
+	}
+	tomb, _ := member(t, a, c.id.ID)
+	if _, err := c.n.Backend().SyncMembers(bg, a.id.ID, []mesh.Member{tomb}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.n.RenameSelf("charlie2"); err != nil {
+		t.Fatal(err)
+	}
+	syncWith(t, d, c)
+	syncWith(t, d, a)
+	syncWith(t, a, d)
+	mustStayRemoved(t, a, c)
+}
+
+func TestSecondRemovalAfterRejoinSticks(t *testing.T) {
+	a, c, d := idleTrio(t)
+	name := "charlie"
+	for round := 0; round < 2; round++ {
+		if err := a.n.RemovePeer(name); err != nil {
+			t.Fatal(err)
+		}
+		syncWith(t, d, a)
+		pair(t, a, c)
+		for range 2 {
+			syncWith(t, c, a)
+			syncWith(t, a, d)
+			syncWith(t, d, a)
+			syncWith(t, d, c)
+		}
+		if !sees(a.n, c.id.ID) || !sees(d.n, c.id.ID) {
+			t.Fatalf("round %d: rejoin did not propagate", round)
+		}
+		name = "charlie" + string(rune('x'+round))
+		c.n.RenameSelf(name) // later changes still win
+		syncWith(t, c, a)
+		syncWith(t, a, d)
+		if p, _ := peer(d.n, c.id.ID); p.Name != name {
+			t.Fatalf("round %d: rename lost: %+v", round, p)
+		}
+	}
+	if err := a.n.RemovePeer(name); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		syncWith(t, d, a)
+		syncWith(t, a, d)
+	}
+	mustStayRemoved(t, a, c)
+	if sees(d.n, c.id.ID) {
+		t.Fatal("d revived c")
+	}
+}
+
+// ---- a remote cannot take this host's own name ----
+
+func TestRemoteCannotShadowOwnName(t *testing.T) {
+	a := boot(t, t.TempDir(), "alpha", bootOpts{idle: true})
+	b := boot(t, t.TempDir(), "bravo", bootOpts{idle: true})
+	pair(t, a, b)
+	a.n.Backend().SyncMembers(bg, b.id.ID, []mesh.Member{{ID: "aaaaaaaa", Name: "alpha", Generation: 1}})
+	id, local, err := a.n.ResolvePeer("alpha")
+	if err != nil || !local || id != a.id.ID {
+		t.Fatalf("%q %v %v", id, local, err)
+	}
+	wantCode(t, a.n.RemovePeer("alpha"), vfs.CodeInvalidRequest)
+	if id, local, err := a.n.ResolvePeer("alpha-2"); err != nil || local || id != "aaaaaaaa" {
+		t.Fatalf("%q %v %v", id, local, err)
+	}
+	if !sees(a.n, "aaaaaaaa") {
+		t.Fatal("namesake was removed")
+	}
+}
+
+// ---- a peer that accepts TCP but never answers ----
+
+func TestHealthTimeoutMarksOffline(t *testing.T) {
+	a := boot(t, t.TempDir(), "alpha", bootOpts{idle: true})
+	a.n.callTimeout = 300 * time.Millisecond
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() }) // held open, never handshakes
+		}
+	}()
+	a.n.Backend().SyncMembers(bg, "x", []mesh.Member{{ID: "silent", Name: "silent", Addrs: []string{ln.Addr().String()}, Generation: 1}})
+	a.n.mu.Lock()
+	a.n.status["silent"] = peerState{online: true, lastSeen: time.Now()}
+	a.n.mu.Unlock()
+	start := time.Now()
+	a.n.healthRound(bg)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("round took %v", d)
+	}
+	if p, ok := peer(a.n, "silent"); !ok || p.Online {
+		t.Fatalf("%+v", p)
 	}
 }

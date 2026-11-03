@@ -64,8 +64,8 @@ type Node struct {
 
 	gossipKick, healthKick chan struct{}
 
-	mu      sync.Mutex // never held while calling into cfg
-	seenGen uint64     // highest generation any peer holds for this host (R7)
+	mu      sync.Mutex                  // never held while calling into cfg
+	seen    struct{ epoch, gen uint64 } // highest active record any peer holds of this host (R7)
 	status  map[string]peerState
 	clients map[string]*clientEntry
 	running bool
@@ -152,16 +152,27 @@ func (n *Node) update(fn func(*config.Config) error) (changed bool, err error) {
 
 // nextGen is the generation for a change this host makes to its own record:
 // above the record's own value and above any value a peer holds (R7).
-func (n *Node) nextGen(own uint64) uint64 {
+// Only generations in this host's own epoch count; a record of an older
+// epoch is irrelevant and tombstones are never observed.
+func (n *Node) nextGen(ownEpoch, own uint64) uint64 {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return max(own, n.seenGen) + 1
+	if n.seen.epoch == ownEpoch {
+		own = max(own, n.seen.gen)
+	}
+	return own + 1
 }
 
-func (n *Node) observeGen(g uint64) {
+// observeGen notes an active record of this host held by a peer.
+func (n *Node) observeGen(epoch, gen uint64) {
 	n.mu.Lock()
-	n.seenGen = max(n.seenGen, g)
-	n.mu.Unlock()
+	defer n.mu.Unlock()
+	switch {
+	case epoch > n.seen.epoch:
+		n.seen.epoch, n.seen.gen = epoch, gen
+	case epoch == n.seen.epoch:
+		n.seen.gen = max(n.seen.gen, gen)
+	}
 }
 
 func indexOf(ms []mesh.Member, id string) int {
@@ -193,7 +204,7 @@ func (n *Node) refreshSelf() (bool, error) {
 		addrs := n.selfAddrs(*c)
 		i := indexOf(c.Members, n.id.ID)
 		if i < 0 {
-			c.Members = append(c.Members, mesh.Member{ID: n.id.ID, Name: c.Name, Addrs: addrs, Generation: n.nextGen(0)})
+			c.Members = append(c.Members, mesh.Member{ID: n.id.ID, Name: c.Name, Addrs: addrs, Generation: n.nextGen(0, 0)})
 			return nil
 		}
 		m := &c.Members[i]
@@ -201,7 +212,7 @@ func (n *Node) refreshSelf() (bool, error) {
 			return errNoChange
 		}
 		m.Name, m.Addrs, m.Removed = c.Name, addrs, false
-		m.Generation = n.nextGen(m.Generation)
+		m.Generation = n.nextGen(m.Epoch, m.Generation)
 		return nil
 	})
 	if changed {
@@ -275,6 +286,7 @@ func (n *Node) RemovePeer(name string) error {
 		}
 		c.Members[i].Removed = true
 		c.Members[i].Generation++
+		c.Members[i].Epoch++ // only removal and re-pairing raise the epoch
 		return nil
 	})
 	if err != nil {

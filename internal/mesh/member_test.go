@@ -105,7 +105,7 @@ func TestMergeConverges(t *testing.T) {
 				continue
 			}
 			g := uint64(r.Intn(3))
-			m := Member{ID: id, Name: id, Generation: g, Removed: r.Intn(3) == 0}
+			m := Member{ID: id, Name: id, Generation: g, Epoch: uint64(r.Intn(3)), Removed: r.Intn(3) == 0}
 			for _, a := range []string{"1:1", "2:2", "3:3"} {
 				if r.Intn(2) == 0 {
 					m.Addrs = append(m.Addrs, a)
@@ -165,5 +165,43 @@ func TestValidName(t *testing.T) {
 		if ValidName(n) != want {
 			t.Errorf("ValidName(%q) != %v", n, want)
 		}
+	}
+}
+
+func TestMergeEpochOutranksGeneration(t *testing.T) {
+	tomb := []Member{{ID: "a", Name: "a", Generation: 2, Removed: true, Epoch: 1}}
+	busy := []Member{{ID: "a", Name: "renamed", Generation: 9, Epoch: 0}}
+	for name, c := range map[string]struct{ local, remote []Member }{"tombstone local": {tomb, busy}, "tombstone remote": {busy, tomb}} {
+		got, _ := Merge(c.local, c.remote, "self")
+		if m, _ := find(got, "a"); !m.Removed || m.Epoch != 1 {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	// A new pairing (higher epoch, lower generation) revives.
+	back := []Member{{ID: "a", Name: "a", Generation: 1, Epoch: 2}}
+	got, changed := Merge(tomb, back, "self")
+	if m, _ := find(got, "a"); m.Removed || !changed {
+		t.Fatalf("%+v %v", got, changed)
+	}
+	got, changed = Merge(back, tomb, "self")
+	if m, _ := find(got, "a"); m.Removed || changed {
+		t.Fatalf("%+v %v", got, changed)
+	}
+	// Equal epochs fall back to the generation rules.
+	got, _ = Merge([]Member{{ID: "a", Name: "x", Generation: 1, Epoch: 1}}, []Member{{ID: "a", Name: "y", Generation: 2, Epoch: 1}}, "self")
+	if m, _ := find(got, "a"); m.Name != "y" {
+		t.Fatalf("%+v", got)
+	}
+	// An epoch-only difference counts as a change.
+	if _, changed := Merge([]Member{{ID: "a", Name: "a", Generation: 1}}, []Member{{ID: "a", Name: "a", Generation: 1, Epoch: 1}}, "self"); !changed {
+		t.Fatal("epoch change not reported")
+	}
+}
+
+func TestLocalNamesSelfFirst(t *testing.T) {
+	ms := []Member{{ID: "aaa", Name: "nas"}, {ID: "zzz", Name: "nas"}}
+	got := LocalNames(ms, "zzz")
+	if got["zzz"] != "nas" || got["aaa"] != "nas-2" {
+		t.Fatalf("%v", got)
 	}
 }
