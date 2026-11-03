@@ -172,10 +172,20 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   `gvfs-backends`).
 - The desktop app walk-through (no display on the build host). Its Go and
   front-end tests pass; the window has never been opened.
-- The CI and release workflows: no remote exists, so they have never run on
-  GitHub. In particular the macOS and Windows test jobs, the e2e suite on those
-  OSes, `wails build -platform darwin/universal` and the Windows NSIS build are
-  untested.
+- The release workflow has never run, so `wails build -platform
+  darwin/universal` and the Windows NSIS build are untested.
+- macOS and Windows test results. The first CI run passed on Linux and failed
+  on `macos-14` and `windows-2022`. Those failures were then fixed from the logs
+  and from Go's source, on Linux, with the code only cross-compiled for those
+  OSes, so whether they pass now can only come from the next CI run. The
+  `desktop (linux)` job of that run failed while `wails build` downloaded a
+  module from proxy.golang.org.
+
+**Known limit on Windows**: a share folder cannot be renamed or deleted while
+the daemon has it open, because `os.Root` holds the directory without
+`FILE_SHARE_DELETE`. `sugar-it share remove` or stopping the daemon releases it.
+Windows also has no directory fsync, so after a power cut a new name's survival
+depends on NTFS, where Linux and macOS sync the directory first.
 
 ## Development
 
