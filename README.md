@@ -170,6 +170,9 @@ destination daemon was killed. `sugar-it mount` at the default `BasicAuthLevel`
 refuses with the administrator commands. The tests and e2e suite also pass on
 that Windows machine.
 
+**Verified release**: tag `v0.1.0` ran the release workflow on all jobs. The Linux
+archive and deb from that release match `checksums.txt` and report their version.
+
 **Verified packaging**: `goreleaser release --snapshot --clean` builds the six
 archives and the deb and rpm packages, and `checksums.txt` matches them.
 
@@ -188,8 +191,8 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   below. Running it as a non-administrator has not been tried.
 - The desktop app walk-through (no display on the build host). Its Go and
   front-end tests pass; the window has never been opened.
-- The release workflow has never run, so `wails build -platform
-  darwin/universal` and the Windows NSIS build are untested.
+- The macOS and Windows desktop assets have been built by the release workflow
+  but never opened.
 
 **Known limit on Windows**: a share folder cannot be renamed or deleted while
 the daemon has it open, because `os.Root` holds the directory without
