@@ -129,6 +129,21 @@ func (r *recordReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// uploadBody hands r to the transport through a pipe. When the peer answers or
+// the connection is lost, the transport closes the request body and then waits
+// for its goroutine, which may be inside the source's Read. A source that is
+// stalled, with a context that is not canceled, would keep Put from returning
+// the outcome. Closing the pipe ends that wait; the copy stops at the source's
+// next return, and until then only that goroutine is left waiting.
+func uploadBody(r io.Reader) io.ReadCloser {
+	pr, pw := io.Pipe()
+	go func() {
+		_, err := io.Copy(pw, r)
+		pw.CloseWithError(err) // nil means EOF
+	}()
+	return pr
+}
+
 func (f *RemoteFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptions) (vfs.Entry, error) {
 	q := pathQuery(p)
 	if o.Overwrite {
@@ -144,7 +159,9 @@ func (f *RemoteFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOpti
 	var rec *recordReader
 	if r != nil {
 		rec = &recordReader{r: r}
-		body = rec
+		up := uploadBody(rec)
+		defer up.Close()
+		body = up
 	}
 	resp, err := f.c.send(ctx, "PUT", f.path("file"), q, body, http.Header{"Content-Type": {"application/octet-stream"}})
 	if err != nil {

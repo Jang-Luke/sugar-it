@@ -110,7 +110,9 @@ func TestRevokeStopsUpload(t *testing.T) {
 	e.share("s", l, false)
 	pr, pw := io.Pipe()
 	defer pw.Close()
-	go pw.Write(make([]byte, 1<<20)) // then the body stalls, with no error
+	// Small enough that no flow control is involved: the sender always ends up
+	// waiting in the source's Read, with no error.
+	go pw.Write(make([]byte, 64<<10))
 	done := make(chan error, 1)
 	go func() {
 		_, err := e.c.FS("s").Put(bg, "up", pr, vfs.PutOptions{})
@@ -120,16 +122,37 @@ func TestRevokeStopsUpload(t *testing.T) {
 	e.b.revoke(e.cliID.ID)
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("the upload succeeded")
-		}
+		wantCode(t, err, vfs.CodePeerUnauthorized)
 	case <-time.After(revokeWait):
-		t.Fatal("the server is still receiving from the removed member")
+		t.Fatal("the removed member's upload has not ended")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "up")); !os.IsNotExist(err) {
 		t.Errorf("destination: %v", err)
 	}
 	waitNoTemp(t, dir)
+}
+
+// The same stalled source when the peer goes away instead of answering.
+func TestPutReturnsWhenPeerGoesWithStalledSource(t *testing.T) {
+	e := start(t, "linux")
+	l, dir := localShare(t, false)
+	e.share("s", l, false)
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	go pw.Write(make([]byte, 64<<10))
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.c.FS("s").Put(bg, "up", pr, vfs.PutOptions{})
+		done <- err
+	}()
+	eventuallyPart(t, dir)
+	e.srv.Close()
+	select {
+	case err := <-done:
+		wantCode(t, err, vfs.CodePeerOffline)
+	case <-time.After(revokeWait):
+		t.Fatal("Put waited for its source after the connection was lost")
+	}
 }
 
 func partFiles(dir string) []string {
