@@ -14,9 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -778,18 +780,28 @@ func TestInvalidNameOnDestination(t *testing.T) {
 	}
 	// Source side is not name-checked: it must be able to name what exists.
 	wantCode(t, f.Remove(bg, "bad:name", false), vfs.CodeNotFound)
-	for _, n := range []string{"CON", "bad:name", "trail."} {
-		if _, err := os.Lstat(filepath.Join(dir, n)); err == nil {
-			t.Fatalf("%s was created", n)
+	// Read back from the listing: on Windows Lstat of CON finds the device and
+	// Lstat of trail. means trail.
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, de := range des {
+		if slices.Contains([]string{"CON", "bad:name", "trail."}, de.Name()) {
+			t.Fatalf("%s was created", de.Name())
 		}
 	}
 
-	// On Linux the same names are fine.
+	// A server on Linux takes the same names. This is about the server's rules,
+	// so the share behind it only accepts: a real one on Windows would refuse.
 	e2 := start(t, "linux")
-	l2, _ := localShare(t, false)
-	e2.share("s", l2, false)
-	if _, err := e2.c.FS("s").Put(bg, "CON", strings.NewReader("d"), vfs.PutOptions{}); err != nil {
-		t.Fatalf("linux: %v", err)
+	var put atomic.Bool
+	e2.share("s", &hookFS{put: func(context.Context, string, io.Reader, vfs.PutOptions) (vfs.Entry, error) {
+		put.Store(true)
+		return vfs.Entry{}, nil
+	}}, false)
+	if _, err := e2.c.FS("s").Put(bg, "CON", strings.NewReader("d"), vfs.PutOptions{}); err != nil || !put.Load() {
+		t.Fatalf("linux: reached the share: %v, %v", put.Load(), err)
 	}
 }
 

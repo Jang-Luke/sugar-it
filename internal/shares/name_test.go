@@ -10,6 +10,8 @@ func TestValidName(t *testing.T) {
 		{"windows", "a:b", false}, {"windows", "a?b", false}, {"windows", "CON", false},
 		{"windows", "nul.txt", false}, {"windows", "a.", false}, {"windows", "a ", false},
 		{"windows", "com1", false}, {"windows", "a\\b", false}, {"windows", "a\x01b", false},
+		{"windows", "CONIN$", false}, {"windows", "conout$", false}, {"windows", "COM\u00b9", false},
+		{"windows", "lpt\u00b3.txt", false}, {"windows", "COM0", true}, {"windows", "COM10", true},
 		{"windows", "a.txt", true}, {"windows", "한글.txt", true}, {"windows", "console", true},
 		{"linux", "a:b", true}, {"linux", "CON", true}, {"linux", "a.", true},
 		{"darwin", "a:b", true},

@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 )
 
-var windowsReserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true}
+var windowsReserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true, "CONIN$": true, "CONOUT$": true}
 
 // ValidName reports whether name can be created as a single path component
 // on the given OS (a runtime.GOOS value). Bytes are never transformed.
@@ -35,8 +35,21 @@ func ValidName(goos, name string) bool {
 	if windowsReserved[base] {
 		return false
 	}
-	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
+	if num, ok := strings.CutPrefix(base, "COM"); ok && windowsPortNumber(num) {
+		return false
+	}
+	if num, ok := strings.CutPrefix(base, "LPT"); ok && windowsPortNumber(num) {
 		return false
 	}
 	return true
+}
+
+// windowsPortNumber reports whether s completes a COM or LPT device name: the
+// digits 1-9 and the superscripts Windows also takes for 1, 2 and 3.
+func windowsPortNumber(s string) bool {
+	switch s {
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9", "\u00b9", "\u00b2", "\u00b3":
+		return true
+	}
+	return false
 }

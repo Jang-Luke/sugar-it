@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -28,6 +29,7 @@ type LocalFS struct {
 	root     *os.Root
 	readOnly bool
 	syncDir  func(dir string) error // default syncDirIn; tests observe it
+	goos     string                 // whose path rules apply; runtime.GOOS but in tests
 }
 
 var _ vfs.FS = (*LocalFS)(nil)
@@ -42,7 +44,7 @@ func Open(s Spec) (*LocalFS, error) {
 		r.Close()
 		return nil, vfs.E(vfs.CodeInvalidPath, "share path is not a directory")
 	}
-	l := &LocalFS{root: r, readOnly: s.ReadOnly}
+	l := &LocalFS{root: r, readOnly: s.ReadOnly, goos: runtime.GOOS}
 	l.syncDir = func(dir string) error { return syncDirIn(r, dir) }
 	return l, nil
 }
@@ -138,11 +140,47 @@ func (l *LocalFS) noLinks(clean string) error {
 	return nil
 }
 
-// cleanPath is vfs.Clean plus the symlink-traversal check.
+// unusableName returns the first component of clean that this OS's own path
+// handling would not take as a plain name, or "". Windows is the only such OS.
+// There os.Root calls "a:b" and "CON" an escape, drops the end of "f." so that
+// it means f, and splits "link\x" where noLinks cannot see the link. Elsewhere
+// every clean component is one name, whatever its bytes.
+func (l *LocalFS) unusableName(clean string) string {
+	if l.goos != "windows" || clean == "" {
+		return ""
+	}
+	for _, comp := range strings.Split(clean, "/") {
+		if !ValidName(l.goos, comp) {
+			return comp
+		}
+	}
+	return ""
+}
+
+// cleanPath is vfs.Clean plus the symlink-traversal check, for a path that is
+// looked up. A name this OS cannot have is simply not there.
 func (l *LocalFS) cleanPath(p string) (string, error) {
 	c, err := vfs.Clean(p)
 	if err != nil {
 		return "", err
+	}
+	if l.unusableName(c) != "" {
+		return "", vfs.E(vfs.CodeNotFound, "not found")
+	}
+	if err := l.noLinks(c); err != nil {
+		return "", err
+	}
+	return c, nil
+}
+
+// cleanDest is cleanPath for a path about to be created (spec 7).
+func (l *LocalFS) cleanDest(p string) (string, error) {
+	c, err := vfs.Clean(p)
+	if err != nil {
+		return "", err
+	}
+	if n := l.unusableName(c); n != "" {
+		return "", vfs.E(vfs.CodeInvalidName, "%q is not a valid file name here", n)
 	}
 	if err := l.noLinks(c); err != nil {
 		return "", err
@@ -377,7 +415,7 @@ func (l *LocalFS) Put(ctx context.Context, p string, r io.Reader, o vfs.PutOptio
 	if err := l.writable(); err != nil {
 		return vfs.Entry{}, err
 	}
-	c, err := l.cleanPath(p)
+	c, err := l.cleanDest(p)
 	if err != nil {
 		return vfs.Entry{}, err
 	}
@@ -469,7 +507,7 @@ func (l *LocalFS) Mkdir(ctx context.Context, p string) error {
 	if err := l.writable(); err != nil {
 		return err
 	}
-	c, err := l.cleanPath(p)
+	c, err := l.cleanDest(p)
 	if err != nil {
 		return err
 	}
@@ -528,7 +566,7 @@ func (l *LocalFS) Rename(ctx context.Context, from, to string) error {
 	if err != nil {
 		return err
 	}
-	t, err := l.cleanPath(to)
+	t, err := l.cleanDest(to)
 	if err != nil {
 		return err
 	}

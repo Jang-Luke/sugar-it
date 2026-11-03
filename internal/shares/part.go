@@ -139,7 +139,7 @@ func (l *LocalFS) CommitPart(key, dst string, mtime time.Time, mode uint32) erro
 	if err := l.writable(); err != nil {
 		return err
 	}
-	d, err := l.cleanPath(dst)
+	d, err := l.cleanDest(dst)
 	if err != nil {
 		return err
 	}

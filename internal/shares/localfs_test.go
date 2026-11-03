@@ -681,3 +681,68 @@ func TestSourceReadErrorDoesNotCarryLocalPath(t *testing.T) {
 		t.Fatalf("Put = %v", err)
 	}
 }
+
+// On Windows os.Root calls "a:b" an escape, drops the end of "f." so that it
+// means f, and splits at a backslash. None of that may show: looked up, such a
+// name is not there; created, it is invalid_name (spec 7), not invalid_path.
+func TestNamesThisOSCannotHave(t *testing.T) {
+	l, dir := newShare(t, false)
+	l.goos = "windows"
+	write(t, filepath.Join(dir, "f"), "x")
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "d", "g"), "y")
+	if runtime.GOOS != "windows" {
+		write(t, filepath.Join(dir, "a:b"), "z") // the refusal comes from the rules, not the disk
+	}
+	part, _, err := l.OpenPart("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part.Close()
+	for _, name := range []string{"a:b", "CON", "CON/f", "nul.txt", "f.", "f ", `d\g`, "q?", "d/a:b", "COM\u00b9", "CONIN$"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := l.Stat(ctx, name)
+			wantCode(t, err, vfs.CodeNotFound)
+			_, err = l.List(ctx, name)
+			wantCode(t, err, vfs.CodeNotFound)
+			_, _, err = l.Open(ctx, name, 0, "")
+			wantCode(t, err, vfs.CodeNotFound)
+			_, err = l.Hash(ctx, name)
+			wantCode(t, err, vfs.CodeNotFound)
+			wantCode(t, l.Remove(ctx, name, true), vfs.CodeNotFound)
+			wantCode(t, l.Rename(ctx, name, "elsewhere"), vfs.CodeNotFound)
+
+			_, err = l.Put(ctx, name, strings.NewReader("d"), vfs.PutOptions{Overwrite: true})
+			wantCode(t, err, vfs.CodeInvalidName)
+			wantCode(t, l.Mkdir(ctx, name), vfs.CodeInvalidName)
+			wantCode(t, l.Rename(ctx, "f", name), vfs.CodeInvalidName)
+			wantCode(t, l.CommitPart("k", name, time.Time{}, 0o644), vfs.CodeInvalidName)
+		})
+	}
+	if got := readAll(t, l, "f"); got != "x" {
+		t.Errorf("f = %q", got)
+	}
+	if got := readAll(t, l, "d/g"); got != "y" {
+		t.Errorf("d/g = %q", got)
+	}
+}
+
+// Elsewhere every clean component is one name, whatever its bytes: a file with
+// a name that is not UTF-8 stays reachable.
+func TestNamesLeftAloneOffWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("these names cannot exist on Windows; TestNamesThisOSCannotHave covers it")
+	}
+	l, dir := newShare(t, false)
+	for _, name := range []string{"a:b", "CON", "f.", "\xff\xfe"} {
+		write(t, filepath.Join(dir, name), "x")
+		if got := readAll(t, l, name); got != "x" {
+			t.Errorf("%q = %q", name, got)
+		}
+	}
+	if _, err := l.Put(ctx, "c:d", strings.NewReader("d"), vfs.PutOptions{}); err != nil {
+		t.Error(err)
+	}
+}
