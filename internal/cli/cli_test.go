@@ -45,7 +45,7 @@ func newConfig(t *testing.T, name string) *host {
 	}
 	if err := cfg.Update(func(c *config.Config) error {
 		c.Name, c.ListenAddr, c.AdvertiseAddrs = name, h.peer, []string{h.peer}
-		c.ControlAddr, c.DAVAddr = freeAddr(t), freeAddr(t)
+		c.ControlAddr, c.DAVAddr = "127.0.0.1:0", "127.0.0.1:0"
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -56,7 +56,23 @@ func newConfig(t *testing.T, name string) *host {
 func newHost(t *testing.T, name string) *host {
 	t.Helper()
 	h := newConfig(t, name)
+	// The peer address has to be known before binding, so another process can
+	// take it first; choose a new one when that happens.
 	d, err := daemon.Start(bg, daemon.Options{ConfigDir: h.dir})
+	for attempt := 0; err != nil && strings.Contains(err.Error(), "address already in use") && attempt < 5; attempt++ {
+		h.peer = freeAddr(t)
+		cfg, cerr := config.Open(h.dir)
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		if cerr := cfg.Update(func(c *config.Config) error {
+			c.ListenAddr, c.AdvertiseAddrs = h.peer, []string{h.peer}
+			return nil
+		}); cerr != nil {
+			t.Fatal(cerr)
+		}
+		d, err = daemon.Start(bg, daemon.Options{ConfigDir: h.dir})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

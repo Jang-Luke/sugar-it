@@ -208,12 +208,10 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
   at logon on Windows. On Windows 11 over SSH, `sugar-it.exe daemon` outlived the
   session, a second start was refused, `stop` removed `runtime.json`, and
   `service uninstall` removed the Run value and stopped the daemon.
-- `sugar-it service uninstall` on Windows: removing the v0.1.0 scheduled task
-  (and the error when it needs an administrator) and stopping a running daemon
-  were tested only with fake commands. On Linux and macOS uninstall stops the
-  service; on Windows removing the Run value cannot stop a process, so the
-  command asks the daemon to stop, and a daemon inside the desktop app keeps
-  running until the app closes.
+- `sugar-it service uninstall` on Windows removing a v0.1.0 scheduled task, and
+  the error when that needs an administrator. Uninstall stops the service on Linux and
+  macOS. On Windows it asks a running daemon to stop, and a daemon inside the
+  desktop app keeps running until the app closes.
 - `sugar-it service install` on Windows actually starting the daemon at logon.
   The Run key value was written with correct quoting and removed again, from an
   administrator session. A non-administrator has not been tried.
