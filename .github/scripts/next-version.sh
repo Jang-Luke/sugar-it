@@ -13,17 +13,12 @@ for label in "$@"; do
   esac
 done
 
-# At most nine digits: anything longer is not a version and would overflow.
-num='(0|[1-9][0-9]{0,8})'
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+highest=$(bash "$here/highest-version.sh")
 major=0 minor=0 patch=0
-while IFS= read -r tag || [ -n "$tag" ]; do
-  tag=${tag%$'\r'}
-  [[ "$tag" =~ ^v$num\.$num\.$num$ ]] || continue
-  a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]} c=${BASH_REMATCH[3]}
-  if ((a > major || (a == major && (b > minor || (b == minor && c > patch))))); then
-    major=$a minor=$b patch=$c
-  fi
-done
+if [ -n "$highest" ]; then
+  IFS=. read -r major minor patch <<<"${highest#v}"
+fi
 
 case "$bump" in
   major) major=$((major + 1)) minor=0 patch=0 ;;

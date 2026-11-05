@@ -1,8 +1,10 @@
 name: auto-release
 
-# Merging a pull request into main publishes a release: test the merge commit,
-# tag it, build. The labels no-release, release:minor and release:major change
-# what happens; see README.
+# Merging a pull request into main publishes a release: test the merge commit, tag
+# it, build. The labels no-release, release:minor and release:major change what
+# happens; see README. A merge is a publish, so review scripts as such: the merge
+# commit's .github/scripts, build scripts and tests run here, and those of the tag
+# and build steps run with contents: write. main is not protected.
 #
 # pull_request_target, because a pull_request token from a fork is read-only. It
 # runs with write access, so: never check out or run the pull request's head, only
@@ -16,11 +18,13 @@ on:
 permissions:
   contents: read
 
-# Merges queue up and none is cancelled by a running one. GitHub keeps one pending
-# run per group, so a third merge during a run replaces the second's pending run.
-# Its commit then ships in the third's release, under the third's labels.
+# Merges that release queue up, and a running one is not cancelled. GitHub keeps one
+# pending run per group, so a third such merge during a run replaces the second's
+# pending run. Its commit then ships in the third's release, under the third's labels.
+# Every other closed pull request gets a group of its own, because the job's `if` is
+# evaluated only after the run has taken its place, and would displace a pending release.
 concurrency:
-  group: auto-release
+  group: ${{ (github.event.pull_request.merged && !contains(github.event.pull_request.labels.*.name, 'no-release')) && 'auto-release' || format('skip-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -50,16 +54,7 @@ jobs:
         id: next
         run: |
           set -euo pipefail
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::$(git rev-parse HEAD) is not on main; nothing was tagged"
-            exit 1
-          fi
-          # Re-running every job after a release must not give the commit a second version.
-          existing=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
-          if [ -n "$existing" ]; then
-            echo "::error::this commit is already tagged ($existing); re-run only the failed jobs, or rebuild by hand"
-            exit 1
-          fi
+          bash .github/scripts/release-guard.sh origin/main
           mapfile -t labels < <(jq -r '.pull_request.labels[].name' "$GITHUB_EVENT_PATH")
           tag=$(git tag --list | bash .github/scripts/next-version.sh "${labels[@]}")
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
