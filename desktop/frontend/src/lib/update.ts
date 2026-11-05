@@ -34,6 +34,11 @@ export function noticeText(code: string): string {
     : ko.update.notices.other
 }
 
+/** Added to a notice when the daemon stopped for the update did not come back. */
+export function noticeDaemonText(info: UpdateInfo): string {
+  return info.NoticeDaemonOff && info.Notice !== 'update_daemon_restart_failed' ? ko.update.notices.daemonOff : ''
+}
+
 export function checkMessage(info: UpdateInfo): string {
   return info.Available ? ko.update.newer(info.Latest) : ko.update.upToDate
 }

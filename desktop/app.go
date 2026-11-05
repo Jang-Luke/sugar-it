@@ -275,6 +275,7 @@ type AppState struct {
 }
 
 func (a *App) AppState() AppState {
+	a.pollHelperStatus()
 	info := a.updateInfo()
 	a.mu.Lock()
 	defer a.mu.Unlock()

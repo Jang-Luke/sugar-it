@@ -36,6 +36,7 @@ const (
 	codeUpdateChecksum    = "update_checksum_mismatch"
 	codeUpdateHelper      = "update_helper_failed"
 	codeUpdateDaemon      = "update_daemon_stop_failed"
+	codeUpdateDaemonOff   = "update_daemon_off"
 	codeUpdateBadURL      = "update_bad_url"
 )
 
@@ -56,15 +57,18 @@ type UpdateInfo struct {
 	Done, Total  int64  // bytes of the download
 	Notice       string // why the previous update attempt failed (update.Outcome*)
 	NoticeDetail string
+	// NoticeDaemonOff: the daemon stopped for that attempt did not start again.
+	NoticeDaemonOff bool
 }
 
 // updateDeps are the update's effects, seams for tests.
 type updateDeps struct {
 	check         func(ctx context.Context) (update.Release, bool, error)
-	download      func(ctx context.Context, rel update.Release, dir string, progress func(done, total int64)) (string, error)
+	download      func(ctx context.Context, rel update.Release, dir string, progress func(done, total int64)) (update.Downloaded, error)
 	mkTemp        func() (string, error)
 	selfExe       func() (string, error)
-	startHelper   func(helperExe, dir string, a update.HelperArgs) error
+	startHelper   func(helperExe, dir string, a update.HelperArgs) (abort func(), err error)
+	waitMarker    func(dir string, d time.Duration) error
 	procImage     func(pid int) (string, error)
 	waitExit      func(pid int, d time.Duration) error
 	restartDaemon func(app, configDir string) error
@@ -77,6 +81,9 @@ type updater struct {
 	deps     updateDeps
 	interval time.Duration
 	busy     atomic.Bool // ApplyUpdate is running; a second click does nothing
+	// helperOut: this app started the helper and is quitting; if it is still here when
+	// a status arrives, the helper gave up waiting for it.
+	helperOut atomic.Bool
 
 	mu        sync.Mutex
 	release   *update.Release // the last release a check returned
@@ -98,6 +105,7 @@ func defaultUpdateDeps(current string) updateDeps {
 		mkTemp:        func() (string, error) { return os.MkdirTemp("", update.TempPrefix+"*") },
 		selfExe:       os.Executable,
 		startHelper:   update.StartHelper,
+		waitMarker:    update.WaitMarker,
 		procImage:     update.ProcessImage,
 		waitExit:      update.WaitExit,
 		restartDaemon: update.StartDaemon,
@@ -203,12 +211,40 @@ func (a *App) updateInfo() UpdateInfo {
 		Total:        a.upd.total,
 		Notice:       a.upd.notice.Outcome,
 		NoticeDetail: a.upd.notice.Detail,
+
+		NoticeDaemonOff: a.upd.notice.DaemonOff,
 	}
 	if r := a.upd.release; r != nil {
 		info.Latest = r.Version.String()
 		info.OneClick = a.upd.available && a.goos == "windows" && r.Installable()
 	}
 	return info
+}
+
+// pollHelperStatus shows a helper's status in a running app. Startup reads it only
+// once, and an app can be running when the helper finishes: one that outlived the
+// helper's wait, which is usable again after this, or one the user reopened during
+// the UAC prompt, which took the single-instance lock from the helper's relaunch.
+func (a *App) pollHelperStatus() {
+	if a.goos != "windows" {
+		return
+	}
+	dir, err := a.resolvedConfigDir()
+	if err != nil {
+		return
+	}
+	s, ok := update.TakeStatus(dir)
+	if !ok {
+		return
+	}
+	a.upd.mu.Lock()
+	a.upd.notice = s
+	a.upd.mu.Unlock()
+	if a.upd.helperOut.CompareAndSwap(true, false) {
+		a.quitting.Store(false)
+		a.setUpdatePhase("")
+		a.upd.busy.Store(false)
+	}
 }
 
 func (a *App) setUpdatePhase(phase string) {
@@ -279,6 +315,7 @@ func (a *App) ApplyUpdate() error {
 		return err
 	}
 	// Still busy: the app is quitting. The flag makes closing quit, not hide.
+	a.upd.helperOut.Store(true)
 	a.quitFromTray()
 	return nil
 }
@@ -314,7 +351,7 @@ func (a *App) applyUpdate() (err error) {
 	}()
 
 	a.setUpdatePhase(phaseDownloading)
-	installer, err := a.upd.deps.download(context.Background(), *rel, dir, func(done, total int64) {
+	got, err := a.upd.deps.download(context.Background(), *rel, dir, func(done, total int64) {
 		a.upd.mu.Lock()
 		a.upd.done, a.upd.total = done, total
 		a.upd.mu.Unlock()
@@ -331,18 +368,43 @@ func (a *App) applyUpdate() (err error) {
 	}
 	restart, err := a.stopDaemonOfThisProgram(self)
 	if err != nil {
+		if restart {
+			// It accepted the shutdown, so sharing is going off.
+			return a.restartDaemonAfter(self, cfg, codeUpdateDaemon, err)
+		}
 		return updateErr(codeUpdateDaemon, err)
 	}
-	h := update.HelperArgs{PID: os.Getpid(), Installer: installer, App: self, ConfigDir: cfg, RestartDaemon: restart}
-	if err := a.upd.deps.startHelper(helper, dir, h); err != nil {
+	failed := func(err error) error {
 		if restart {
-			if rerr := a.upd.deps.restartDaemon(self, cfg); rerr != nil {
-				log.Printf("sugar-it: restart the daemon: %v", rerr)
-			}
+			return a.restartDaemonAfter(self, cfg, codeUpdateHelper, err)
 		}
 		return updateErr(codeUpdateHelper, err)
 	}
+	h := update.HelperArgs{PID: os.Getpid(), Installer: got.Path, SHA256: got.SHA256, App: self, ConfigDir: cfg, RestartDaemon: restart}
+	abort, err := a.upd.deps.startHelper(helper, dir, h)
+	if err != nil {
+		return failed(err)
+	}
+	// Once this app has quit nothing could start it again, so make sure of the helper
+	// first: an antivirus may remove it just as it starts.
+	if err := a.upd.deps.waitMarker(dir, update.MarkerWait); err != nil {
+		abort()
+		return failed(err)
+	}
 	return nil
+}
+
+// restartDaemonAfter starts the stopped daemon again after a failure, and says so
+// if that fails too, because sharing is then off.
+func (a *App) restartDaemonAfter(self, cfg, code string, cause error) error {
+	a.mu.Lock()
+	a.be = nil
+	a.mu.Unlock()
+	if err := a.upd.deps.restartDaemon(self, cfg); err != nil {
+		log.Printf("sugar-it: restart the daemon: %v", err)
+		return updateErr(codeUpdateDaemonOff, fmt.Errorf("%v; restart the daemon: %w", cause, err))
+	}
+	return updateErr(code, cause)
 }
 
 func downloadCode(err error) string {
@@ -361,7 +423,8 @@ func downloadCode(err error) string {
 
 // stopDaemonOfThisProgram stops an external daemon that runs from this very file,
 // such as a Run key's `sugar-it-desktop.exe daemon`: it locks the file against the
-// installer. It reports whether it did, so that the helper starts it again. A daemon
+// installer. It reports whether it stopped one, so that the helper starts it again,
+// which is also true with an error if the daemon accepted but has not exited. A daemon
 // of another program, such as sugar-it.exe, locks nothing here and is left alone,
 // and one that cannot be identified is treated the same way.
 func (a *App) stopDaemonOfThisProgram(self string) (bool, error) {
@@ -401,7 +464,7 @@ func (a *App) stopDaemonOfThisProgram(self string) (bool, error) {
 	a.mu.Unlock()
 	// The file stays locked until the process has really exited.
 	if err := a.upd.deps.waitExit(rt.PID, daemon.Grace+5*time.Second); err != nil {
-		return false, fmt.Errorf("wait for the daemon to stop: %w", err)
+		return true, fmt.Errorf("wait for the daemon to stop: %w", err)
 	}
 	return true, nil
 }

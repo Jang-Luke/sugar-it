@@ -39,6 +39,7 @@ export interface UpdateInfo {
   Total: number
   Notice: string
   NoticeDetail: string
+  NoticeDaemonOff: boolean
 }
 
 export interface AppState {

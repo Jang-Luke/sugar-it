@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ko } from '../ko'
 import type { UpdateInfo } from './api'
-import { checkMessage, noticeText, showBanner, updateBusy, updateErrorText, progressText } from './update'
+import { checkMessage, noticeDaemonText, noticeText, showBanner, updateBusy, updateErrorText, progressText } from './update'
 
 const info = (over: Partial<UpdateInfo> = {}): UpdateInfo => ({
   Current: '1.2.3',
@@ -13,6 +13,7 @@ const info = (over: Partial<UpdateInfo> = {}): UpdateInfo => ({
   Total: 0,
   Notice: '',
   NoticeDetail: '',
+  NoticeDaemonOff: false,
   ...over,
 })
 
@@ -97,6 +98,24 @@ describe('update errors', () => {
   it('explains a failure from before the restart', () => {
     expect(noticeText('update_denied')).toBe(ko.update.notices.update_denied)
     expect(noticeText('hasOwnProperty')).toBe(ko.update.notices.other)
+  })
+})
+
+describe('failure notices', () => {
+  it('points every update failure at the release page', () => {
+    for (const code of ['update_installer_failed', 'update_installer_changed', 'update_installer_timeout', 'update_denied', 'update_timeout']) {
+      expect(noticeText(code)).toContain('릴리스 페이지')
+    }
+  })
+  it('says sharing may be off when the daemon did not come back', () => {
+    expect(noticeDaemonText(info({ Notice: 'update_denied', NoticeDaemonOff: true }))).toBe(ko.update.notices.daemonOff)
+    expect(noticeDaemonText(info({ Notice: 'update_denied' }))).toBe('')
+    // That notice says so itself.
+    expect(noticeDaemonText(info({ Notice: 'update_daemon_restart_failed', NoticeDaemonOff: true }))).toBe('')
+    expect(noticeText('update_daemon_restart_failed')).toContain('공유')
+  })
+  it('explains an update error that left sharing off', () => {
+    expect(updateErrorText('update_daemon_off')).toContain('공유')
   })
 })
 

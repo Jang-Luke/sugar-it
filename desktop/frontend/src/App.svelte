@@ -3,7 +3,7 @@
   import { ko } from './ko'
   import { parseError, wailsApi, type Api, type ApiError, type AppState, type Job, type Status } from './lib/api'
   import { errorText, isActive, pollJobs } from './lib/transfers'
-  import { noticeText, progressText, showBanner, updateBusy, updateErrorText } from './lib/update'
+  import { noticeDaemonText, noticeText, progressText, showBanner, updateBusy, updateErrorText } from './lib/update'
   import Dialog from './components/Dialog.svelte'
   import Files from './views/Files.svelte'
   import Hosts from './views/Hosts.svelte'
@@ -144,9 +144,10 @@
   {/if}
   {#if update?.Notice}
     <div class="top bad" role="alert">
-      <strong>{noticeText(update.Notice)}</strong>
+      <strong>{noticeText(update.Notice)} {noticeDaemonText(update)}</strong>
       {#if update.NoticeDetail}<span class="muted mono">{update.NoticeDetail}</span>{/if}
       <span class="grow"></span>
+      <button on:click={openReleasePage}>{ko.update.openPage}</button>
       <button on:click={dismissNotice}>{ko.common.close}</button>
     </div>
   {/if}
@@ -163,8 +164,10 @@
       <span class="grow"></span>
       {#if !updateBusy(update) && showBanner(update, dismissedUpdate)}
         <button class="primary" on:click={updateClicked}>{update.OneClick ? ko.update.install : ko.update.openPage}</button>
+        {#if updateError && update.OneClick}<button on:click={openReleasePage}>{ko.update.openPage}</button>{/if}
         <button on:click={() => (dismissedUpdate = update?.Latest ?? '')}>{ko.update.later}</button>
       {:else if updateError && !updateBusy(update)}
+        <button on:click={openReleasePage}>{ko.update.openPage}</button>
         <button on:click={() => (updateError = null)}>{ko.common.close}</button>
       {/if}
     </div>

@@ -34,10 +34,15 @@ type updateFake struct {
 	imageErr    error
 	waitErr     error
 	restarts    []string
+	restartErr  error
+	markerErr   error
+	aborted     int
 	tempDirs    []string
 	sweeps      int
 	self        string
 }
+
+const fakeSHA = "abab"
 
 func installableRelease(tag string) update.Release {
 	v, _ := update.ParseTag(tag)
@@ -76,17 +81,17 @@ func updateApp(t *testing.T, goos, ver string) (*App, *updateFake, *windowSpy) {
 			defer f.mu.Unlock()
 			return f.release, f.newer, f.checkErr
 		},
-		download: func(ctx context.Context, rel update.Release, dir string, progress func(done, total int64)) (string, error) {
+		download: func(ctx context.Context, rel update.Release, dir string, progress func(done, total int64)) (update.Downloaded, error) {
 			f.downloads.Add(1)
 			if f.downloadGo != nil {
 				<-f.downloadGo
 			}
 			if f.downloadErr != nil {
-				return "", f.downloadErr
+				return update.Downloaded{}, f.downloadErr
 			}
 			progress(3, 7)
 			p := filepath.Join(dir, update.InstallerAsset)
-			return p, os.WriteFile(p, []byte("installer"), 0o700)
+			return update.Downloaded{Path: p, SHA256: fakeSHA}, os.WriteFile(p, []byte("installer"), 0o700)
 		},
 		mkTemp: func() (string, error) {
 			d, err := os.MkdirTemp(t.TempDir(), update.TempPrefix+"*")
@@ -94,19 +99,20 @@ func updateApp(t *testing.T, goos, ver string) (*App, *updateFake, *windowSpy) {
 			return d, err
 		},
 		selfExe: func() (string, error) { return f.self, nil },
-		startHelper: func(exe, dir string, h update.HelperArgs) error {
+		startHelper: func(exe, dir string, h update.HelperArgs) (func(), error) {
 			if f.helperErr != nil {
-				return f.helperErr
+				return nil, f.helperErr
 			}
 			f.helperExe = exe
 			f.helperArgs = append(f.helperArgs, h)
-			return nil
+			return func() { f.aborted++ }, nil
 		},
-		procImage: func(int) (string, error) { return f.image, f.imageErr },
-		waitExit:  func(int, time.Duration) error { return f.waitErr },
+		waitMarker: func(string, time.Duration) error { return f.markerErr },
+		procImage:  func(int) (string, error) { return f.image, f.imageErr },
+		waitExit:   func(int, time.Duration) error { return f.waitErr },
 		restartDaemon: func(app, cfg string) error {
 			f.restarts = append(f.restarts, app+"|"+cfg)
-			return nil
+			return f.restartErr
 		},
 		openURL: func(_ context.Context, u string) { f.opened = append(f.opened, u) },
 		sweep:   func() { f.sweeps++ },
@@ -310,8 +316,8 @@ func TestApplyUpdateStartsTheHelperAndQuits(t *testing.T) {
 	if h.PID != os.Getpid() || h.App != f.self || h.ConfigDir != a.configDir || h.RestartDaemon {
 		t.Errorf("helper args %+v", h)
 	}
-	if h.Installer != filepath.Join(dir, update.InstallerAsset) {
-		t.Errorf("installer %s", h.Installer)
+	if h.Installer != filepath.Join(dir, update.InstallerAsset) || h.SHA256 != fakeSHA {
+		t.Errorf("installer %s, hash %s", h.Installer, h.SHA256)
 	}
 	if f.helperExe != filepath.Join(dir, update.HelperExe) {
 		t.Errorf("helper %s", f.helperExe)
@@ -495,6 +501,93 @@ func TestApplyUpdateDaemonDoesNotExitInTime(t *testing.T) {
 	if len(f.helperArgs) != 0 || spy.quits.Load() != 0 {
 		t.Errorf("helper %v, quits %d", f.helperArgs, spy.quits.Load())
 	}
+	if len(f.restarts) != 1 {
+		t.Errorf("restarts %v: it accepted the shutdown, so sharing may be off", f.restarts)
+	}
+}
+
+func TestApplyUpdateSaysSharingIsOffWhenTheDaemonCannotRestart(t *testing.T) {
+	a, f, _ := readyToApply(t)
+	attached(t, a)
+	f.image, f.waitErr, f.restartErr = f.self, update.ErrWaitTimeout, errors.New("refused")
+	wantCode(t, a.ApplyUpdate(), codeUpdateDaemonOff)
+
+	a, f, _ = readyToApply(t)
+	attached(t, a)
+	f.image, f.helperErr, f.restartErr = f.self, errors.New("blocked"), errors.New("refused")
+	wantCode(t, a.ApplyUpdate(), codeUpdateDaemonOff)
+}
+
+// Defender may remove the helper as it starts: without this, the app would quit and
+// nothing would start it again.
+func TestApplyUpdateWithAHelperThatNeverStarts(t *testing.T) {
+	a, f, spy := readyToApply(t)
+	attached(t, a)
+	f.image, f.markerErr = f.self, update.ErrHelperGone
+	wantCode(t, a.ApplyUpdate(), codeUpdateHelper)
+	if a.quitting.Load() || spy.quits.Load() != 0 {
+		t.Error("the app is quitting")
+	}
+	if f.aborted != 1 {
+		t.Errorf("aborted %d times", f.aborted)
+	}
+	if len(f.restarts) != 1 {
+		t.Errorf("restarts %v", f.restarts)
+	}
+	if p := a.AppState().Update.Phase; p != "" {
+		t.Errorf("phase %q", p)
+	}
+	if _, err := os.Stat(f.tempDirs[0]); !os.IsNotExist(err) {
+		t.Errorf("temp directory stayed: %v", err)
+	}
+}
+
+// The helper gave up waiting for this app, which is still running: it must say so
+// and be able to try again.
+func TestRunningAppPicksUpTheHelperStatus(t *testing.T) {
+	a, f, spy := readyToApply(t)
+	a.configDir = t.TempDir()
+	if err := a.ApplyUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	if !a.quitting.Load() || spy.quits.Load() != 1 {
+		t.Fatal("not quitting")
+	}
+	if n := a.AppState().Update.Notice; n != "" {
+		t.Errorf("notice %q before any status", n)
+	}
+	if err := update.WriteStatus(a.configDir, update.Status{Outcome: update.OutcomeTimeout, Detail: "d", DaemonOff: true}); err != nil {
+		t.Fatal(err)
+	}
+	info := a.AppState().Update
+	if info.Notice != update.OutcomeTimeout || info.NoticeDetail != "d" || !info.NoticeDaemonOff {
+		t.Errorf("Update = %+v", info)
+	}
+	if a.quitting.Load() {
+		t.Error("still quitting, so closing would not hide the window")
+	}
+	if err := a.ApplyUpdate(); err != nil {
+		t.Errorf("a new attempt: %v", err)
+	}
+	if len(f.helperArgs) != 2 {
+		t.Errorf("helper started %d times", len(f.helperArgs))
+	}
+}
+
+// Reopened during the UAC prompt, this app holds the lock, so the helper's relaunch
+// exits and nothing else would ever show why the update did nothing.
+func TestAReopenedAppShowsTheHelperStatus(t *testing.T) {
+	a, _, _ := readyToApply(t)
+	a.configDir = t.TempDir()
+	if err := update.WriteStatus(a.configDir, update.Status{Outcome: update.OutcomeInstallerFailed}); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.AppState().Update.Notice; n != update.OutcomeInstallerFailed {
+		t.Errorf("notice %q", n)
+	}
+	if a.upd.busy.Load() {
+		t.Error("busy")
+	}
 }
 
 func TestApplyUpdateRestartsTheDaemonIfTheHelperCannotStart(t *testing.T) {
@@ -586,8 +679,9 @@ func TestKoHasEveryUpdateCode(t *testing.T) {
 	for _, code := range []string{
 		codeUpdateDev, codeUpdateUnsupported, codeUpdateNone, codeUpdateCheck, codeUpdateNoRelease,
 		codeUpdateNoInstaller, codeUpdateDownload, codeUpdateTooLarge, codeUpdateNoChecksum,
-		codeUpdateChecksum, codeUpdateHelper, codeUpdateDaemon, codeUpdateBadURL,
+		codeUpdateChecksum, codeUpdateHelper, codeUpdateDaemon, codeUpdateDaemonOff, codeUpdateBadURL,
 		update.OutcomeDenied, update.OutcomeInstallerFailed, update.OutcomeTimeout,
+		update.OutcomeInstallerChanged, update.OutcomeInstallerTimeout, update.OutcomeDaemonRestart,
 	} {
 		if !strings.Contains(string(b), code+":") {
 			t.Errorf("ko.ts has no text for %s", code)
