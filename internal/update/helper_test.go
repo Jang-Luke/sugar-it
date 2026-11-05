@@ -437,9 +437,11 @@ func TestSameHashIgnoresCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, _ := HashFile(p)
-	if _, err := HoldVerified(func(path string) (*os.File, error) { return os.Open(path) }, p, strings.ToUpper(h)); err != nil {
-		t.Error(err)
+	held, err := HoldVerified(func(path string) (*os.File, error) { return os.Open(path) }, p, strings.ToUpper(h))
+	if err != nil {
+		t.Fatal(err)
 	}
+	held.Close() // Windows cannot delete the temp dir while the file is open.
 }
 
 func TestMarker(t *testing.T) {

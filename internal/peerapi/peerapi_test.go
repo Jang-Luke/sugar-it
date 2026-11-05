@@ -1365,7 +1365,7 @@ func (r ctxFailReader) Read([]byte) (int, error) {
 
 func TestPutCancelRacesWithSourceError(t *testing.T) {
 	e := start(t, "linux")
-	l, _ := localShare(t, false)
+	l, dir := localShare(t, false)
 	e.share("s", l, false)
 	for i := 0; i < 30; i++ {
 		ctx, cancel := context.WithCancel(bg)
@@ -1373,5 +1373,19 @@ func TestPutCancelRacesWithSourceError(t *testing.T) {
 		_, err := e.c.FS("s").Put(ctx, "f", ctxFailReader{ctx}, vfs.PutOptions{})
 		wantCode(t, err, vfs.CodeCanceled)
 		cancel()
+	}
+	// The server notices each cancel a moment after the client does. Its temp
+	// files must all go away, and on Windows the test's cleanup cannot delete
+	// them while they are open.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		left, err := os.ReadDir(filepath.Join(dir, vfs.PartDir))
+		if (err != nil && os.IsNotExist(err)) || (err == nil && len(left) == 0) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("temp files left after cancelled uploads: %v (%v)", left, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
