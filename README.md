@@ -11,23 +11,27 @@ on Linux. What was not run is listed under [Verification status](#verification-s
 
 ## Install
 
-There is no published release yet. Build from source (Go 1.27 or newer):
+Download from the public releases page:
+<https://github.com/Jang-Luke/sugar-it/releases>. Every release has:
+
+- `sugar-it` archives for linux, darwin and windows on amd64 and arm64
+  (`.tar.gz`, `.zip` on Windows) and a `checksums.txt` (built by GoReleaser,
+  `release.yml`, job `cli`).
+- `.deb` and `.rpm` packages for Linux. They install `/usr/bin/sugar-it` only:
+  they do not enable or start any service. Run `sugar-it service install` as
+  your own user when you want the background service.
+- `sugar-it-desktop` (Wails GUI, `release.yml`, job `desktop`): a Linux binary, a
+  macOS universal `.app` (zipped) and a Windows NSIS installer, each with a
+  `<asset>.sha256`. Assets from before the automatic releases have no `.sha256`.
+  These packages do not contain the `sugar-it` command. The app's service button
+  runs the app's own binary as the daemon (`sugar-it-desktop daemon`, no window;
+  it detaches like `sugar-it daemon`), or a `sugar-it` beside it.
+
+Or build from source (Go 1.27 or newer):
 
 ```
 go build -o sugar-it ./cmd/sugar-it
 ```
-
-Tagged releases are meant to provide the following. The first two items are built by GoReleaser (`release.yml`, job `cli`); the desktop assets are built by a separate `wails build` job (`release.yml`, job `desktop`):
-
-- `sugar-it` archives for linux, darwin and windows on amd64 and arm64
-  (`.tar.gz`, `.zip` on Windows) and a `checksums.txt`.
-- `.deb` and `.rpm` packages for Linux. They install `/usr/bin/sugar-it` only:
-  they do not enable or start any service. Run `sugar-it service install` as
-  your own user when you want the background service.
-- `sugar-it-desktop` (Wails GUI, not part of GoReleaser or `checksums.txt`): a Linux binary, a macOS universal `.app`
-  (zipped) and a Windows NSIS installer. These packages do not contain the
-  `sugar-it` command. The app's service button runs the app's own binary as the
-  daemon (`sugar-it-desktop daemon`, no window; it detaches like `sugar-it daemon`), or a `sugar-it` beside it.
 
 Desktop window behaviour: only one desktop app runs at a time; starting it a
 second time shows (and focuses) the existing window, also when it is hidden. On
@@ -50,6 +54,9 @@ cd desktop/frontend && npm ci && npm run build && cd ..
 wails build -tags webkit2_41        # -tags webkit2_41 is for Linux only
 ```
 
+A build without `-ldflags "-X main.version=x.y.z"` has the version `dev` and never
+looks for updates.
+
 ### Unsigned binaries
 
 Nothing is code signed or notarized. Expect warnings:
@@ -62,7 +69,68 @@ Nothing is code signed or notarized. Expect warnings:
 
 Check the `sugar-it` archives and packages against `checksums.txt` instead of
 trusting the warning dialog either way. `checksums.txt` does not cover the
-`sugar-it-desktop` assets, which have no checksum file.
+`sugar-it-desktop` assets; each has its own `<asset>.sha256`, which verifies with
+`sha256sum -c` (or `shasum -a 256 -c`) from the download folder. On Windows, compare
+the output of `certutil -hashfile <asset> SHA256` with it.
+
+## Updating the desktop app
+
+The app checks for a newer full release at startup and every 6 hours. A newer
+version shows a banner with 나중에, which hides that version until the next start.
+The Hosts view shows the app's version and has a 지금 확인 button. A failed scheduled
+check is only logged; a failed 지금 확인 says why.
+
+- **Windows**: 업데이트 installs in one click. After a confirmation (the app restarts,
+  sharing pauses briefly, active transfers resume afterwards), the app downloads
+  the installer and its `.sha256`, verifies it, quits and starts a small helper,
+  a copy of itself in a temporary folder. The helper waits for the app to exit,
+  runs the installer silently after the UAC prompt, into the folder the app ran
+  from, and starts the app again. If you refuse the prompt or the installer fails,
+  the old app comes back and says so. A checksum that is missing or does not match
+  refuses the install and deletes the file.
+- **macOS and Linux**: the banner's button opens the release page and you install it
+  yourself. Their asset formats and the missing code signing make safe in-place
+  replacement a separate job.
+- **The `sugar-it` command** has no updater.
+
+Daemons: a daemon inside the app stops with it. An external daemon started from the
+same `sugar-it-desktop.exe`, such as the logon entry the service button adds, locks
+the file, so it is stopped gracefully before the update and started again by
+`daemon` afterwards, with `--config-dir` but without any other flags it was started
+with. An external `sugar-it.exe` is not touched and keeps its version.
+
+**Privacy**: the app contacts `api.github.com` at startup and every 6 hours,
+unauthenticated, with the `User-Agent` `sugar-it-desktop/<version>` and nothing about
+you or your files. GitHub sees your IP address, as with any request. A build with the
+version `dev` makes no request.
+
+**What the checksum means**: HTTPS and the checksum guard against corruption in
+transit. They do not guard against a compromised repository: the checksum comes from
+the same release as the installer, and builds are unsigned. Trusting the update means
+trusting this GitHub repository, as it does for a manual download.
+
+## Releasing
+
+Merging a pull request into `main` publishes a release (`auto-release.yml`): the CI
+suite runs on the merge commit, then the annotated tag is pushed, then everything is
+built and published as a full release. The version goes up from the highest `vX.Y.Z`
+tag, by the pull request's labels:
+
+- no label: patch
+- `release:minor`: minor
+- `release:major`: major, also when `release:minor` is there too
+- `no-release`: nothing is run
+
+Failed CI means no tag and no release. A tag that already exists, or a merge commit
+that already has a version tag, fails clearly and nothing new is tagged. Merges queue
+up. GitHub keeps only one pending run, so a third merge during a run replaces the
+second's pending run, and the second's commit ships in the third's release under the
+third's labels. Pushing a tag by hand still works: `git tag -a vX.Y.Z -m vX.Y.Z` and
+push it. A tag with a suffix such as `v1.2.3-rc1` becomes a pre-release, which the app
+does not offer.
+
+The workflow runs from `main` with write access, so it never checks out a pull
+request's head, only the merge commit, and passes no pull request text to a script.
 
 ## Firewall
 
@@ -198,12 +266,24 @@ that Windows machine.
 
 **Verified release**: tag `v0.1.0` ran the release workflow on all jobs. The Linux
 archive and deb from that release match `checksums.txt` and report their version.
+`v0.1.0` to `v0.1.2` are marked as pre-releases on GitHub, so `/releases/latest` has
+nothing until the first full release, and those versions have no updater: install
+the first version with an updater by hand.
 
 **Verified packaging**: `goreleaser release --snapshot --clean` builds the six
 archives and the deb and rpm packages, and `checksums.txt` matches them.
 
 **Not verified**:
 
+- `auto-release.yml` has never run, nor `release.yml` through `workflow_call`, nor the
+  new checksums. The YAML was parsed and the version script is tested; `actionlint`
+  was not available. `changelog: github-native` and `prerelease: auto` in
+  `.goreleaser.yaml` were not run either.
+- The Windows update has never run on Windows: the download, the UAC prompt, the
+  silent install with `/D=`, the relaunch, the daemon restart, how Defender treats a
+  helper in the temporary folder, and what the NSIS installer does when a file stays
+  locked. Its logic is tested on Linux with fakes and it cross-compiles. See
+  `docs/manual-test.md`.
 - The docker `dpkg -i` install check has never been run. The amd64 deb was
   unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer
   scripts, and that binary prints its version. The rpm packages were built but
@@ -252,9 +332,9 @@ unsigned, in `%TEMP%`, and run over SSH, so an installed copy may behave
 differently; this has not been tested. If it happens to you, Windows Security
 shows the detection.
 
-**Upgrading the Windows app**: from v0.1.2, closing the window keeps the app in
-the tray, which keeps `sugar-it-desktop.exe` locked. Choose 종료 from the tray
-menu before running a new installer.
+**Upgrading the Windows app by hand**: from v0.1.2, closing the window keeps the app
+in the tray, which keeps `sugar-it-desktop.exe` locked. Choose 종료 from the tray
+menu before running a new installer. The updater in the app does this itself.
 
 **Upgrading from v0.1.0**: `sugar-it daemon` now detaches, so a service
 installed by v0.1.0 stops working: run `sugar-it service install` again to

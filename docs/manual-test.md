@@ -291,3 +291,53 @@ second start refused, `stop`, `stop` again). The rest has not been run.
    (a GUI-subsystem parent). After `service install` and a logon, see whether a
    console window flashes for `sugar-it.exe`. Not yet run on Windows.
 7. macOS: the same as Linux; the LaunchAgent uses `daemon --foreground`.
+
+## Desktop update
+
+None of this has been run. It needs a release newer than the build under test, so
+build an old version with `wails build -ldflags "-X main.version=0.0.1"`, or install
+an older release. The tests in `internal/update` and `desktop/update_test.go` cover
+the logic with fakes; only these steps touch GitHub, UAC and the installer.
+
+1. A build without the `-ldflags` shows `dev` in the Hosts view, 지금 확인 says
+   "개발 빌드는 업데이트를 확인하지 않습니다", and no connection to `api.github.com` is
+   made.
+2. With an old version: the banner names the new version shortly after startup. 나중에
+   hides it; a restart shows it again. 지금 확인 says a newer version exists and brings
+   the banner back. With the newest version it says "최신 버전입니다".
+3. No network, or `api.github.com` blocked: no banner and no error at startup, a line
+   "update check" in the log. 지금 확인 shows the error beside the button.
+4. macOS and Linux: the banner says the app does not install in place. The button
+   opens `https://github.com/Jang-Luke/sugar-it/releases/tag/v...` in the browser.
+5. Windows, installed with the installer, with the app hosting the daemon and a
+   transfer running. 업데이트 shows a dialog with the restart, the pause and the number
+   of transfers. Clicking 취소 changes nothing. After confirming: a percentage, the app
+   quits with no tray icon left, a UAC prompt. Accept: the new version starts
+   unhidden and unelevated (Task Manager, Elevated: No), the Hosts view shows the new
+   version, no installer window appeared, the transfer resumes, and
+   `%TEMP%\sugar-it-update-*` holds at most the helper. A start an hour later removes it.
+6. Windows, refuse the UAC prompt: the old version starts again and says the install
+   was not allowed, once. Sharing works.
+7. Windows, installed to a folder other than the default: the update stays in that
+   folder. Note whether Defender or SmartScreen objects to the helper or the installer
+   in `%TEMP%`; Defender flagged an earlier background start.
+8. Windows, attached to a logon daemon: press the service button, log on again, start
+   the app (no in-process banner). The update stops the daemon, and afterwards
+   `sugar-it-desktop.exe daemon` runs again from the new file and the app is attached
+   to it. With `--config-dir`, the same directory is used again. Repeat with
+   `sugar-it.exe daemon`: that process is not touched and keeps its version.
+9. Windows, keep the program locked by something else, such as a daemon of another
+   config directory: note what the silent installer reports. The old version must not
+   be left half replaced without a message.
+10. Corrupt path: serve a wrong `.sha256` through a test release. The install is
+    refused, the app keeps running, and nothing stays in `%TEMP%`.
+
+## Automatic release
+
+Not yet run. In a pull request, merge once with each of: no label (patch),
+`release:minor`, `release:minor` and `release:major` (major), `no-release` (nothing
+runs). Check that CI ran on the merge commit before the tag appeared, that the release
+is not a pre-release, and that each desktop asset has a `.sha256` that verifies:
+`sha256sum -c sugar-it-desktop_linux_amd64.sha256`. Also check that
+`sugar-it-desktop` shows the version of the tag. Pushing a tag by hand must still
+release. A failing test must leave no tag.

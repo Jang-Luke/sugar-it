@@ -170,7 +170,10 @@ sugar-it service install | uninstall
   - **Linux:** 변경 없음. 창을 닫으면 앱이 종료된다.
   - **모든 OS:** `options.App.SingleInstanceLock`(고정된 앱 전용 ID)로 두 번째 실행은 새 앱을 띄우지 않고 기존 창을 보이고 앞으로 가져온다. Windows와 macOS에서는 창이 숨겨져 있어도 그렇다. `daemon` 인수 경로는 트레이나 Wails보다 먼저 실행되므로 헤드리스 `daemon`은 트레이를 만들지 않는다.
   - 프로세스 안 데몬 배너는 OS별로 참이어야 한다. 창 닫기가 숨김이면 "창을 닫아도 공유는 계속된다, 종료하면 멈춘다"고 하고, 닫기가 종료이면 "앱을 닫으면 공유가 중단된다"고 한다.
-- GUI 문구는 한국어, CLI 문구는 영어다. 예외: 트레이 항목("열기", "종료")과 툴팁(`sugar-it`)은 Go 상수(`desktop/tray.go`)다. `ko.ts`를 Go에서 읽을 수 없기 때문이다.
+- **업데이트:** 릴리스 빌드(`-X main.version=x.y.z`)는 시작할 때와 6시간마다 `https://api.github.com/repos/Jang-Luke/sugar-it/releases/latest`를 인증 없이 조회한다. 제한 시간은 15초이고 `User-Agent`는 `sugar-it-desktop/<version>`이며 사용자 데이터는 보내지 않는다. 버전이 `dev`이면 아무것도 조회하지 않는다. 예약 조회의 실패(403, 404 포함)는 로그만 남기고 화면에 표시하지 않으며 다음 주기까지 다시 시도하지 않는다. 태그는 `^v\d+\.\d+\.\d+$`만 받고 엄격히 더 높은 버전만 새 버전이다. 릴리스 내용은 신뢰하지 않으므로 화면에는 버전만 보이고 `{@html}`을 쓰지 않으며, 브라우저로는 정확히 `https://github.com/Jang-Luke/sugar-it/releases/`로 시작하고 경로를 벗어날 수 없는 주소만 연다.
+  - 배너는 새 버전을 알리고 "업데이트"와 "나중에"를 보인다. "나중에"는 이번 실행 동안 그 버전만 숨긴다. 호스트·공유 탭은 앱 버전과 "지금 확인"을 보이며, 사용자가 요청한 것이므로 "최신 버전입니다" 또는 오류를 그 자리에 표시한다.
+  - Windows는 한 번의 클릭으로 설치한다(11절). 설치 전 대화상자에서 앱이 다시 시작되고 공유가 잠시 멈추며, 진행 중인 전송 N건은 다시 시작한 뒤 이어진다고 알린다. macOS와 Linux는 배포 형식이 다르고 서명이 없어 앱 안에서 바꿔 설치하는 것이 별도 작업이므로, 그 이유를 말하고 릴리스 페이지를 연다. CLI에는 업데이트 기능이 없다.
+- GUI 문구는 한국어, CLI 문구는 영어다. 예외: 트레이 항목("열기", "종료")과 툴팁(`sugar-it`)은 Go 상수(`desktop/tray.go`)다. `ko.ts`를 Go에서 읽을 수 없기 때문이다. 업데이트 도우미에는 화면이 없고, 실패 원인은 코드로 남겨 다음 실행의 앱이 `ko.ts` 문구로 보여 준다.
 
 ## 11. 패키징
 
@@ -183,3 +186,13 @@ sugar-it service install | uninstall
   - Windows: 사용자 Run 레지스트리 값(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 `sugar-it`, `reg add`/`reg delete`). 예약 작업(`schtasks /SC ONLOGON`)은 관리자 권한이 필요해 쓰지 않는다. 설치해도 데몬을 바로 시작하지 않고 다음 로그인부터 실행된다. 이미 지워진 값을 제거하는 것은 오류가 아니다. Run 키 값은 `daemon`(분리 실행)을 쓰므로 `sugar-it.exe`도 콘솔을 남기지 않는다(부모가 잠깐 콘솔을 띄울 수 있는지는 미검증). `sugar-it-desktop.exe daemon`도 같은 경로로 동작해야 하며, GUI 하위 시스템 부모에서의 실행은 아직 검증하지 않았다.
   - 사용자의 파일과 설정에 접근하도록 모두 사용자 권한으로 실행한다.
 - GUI의 서비스 설치는 앱 옆에 `sugar-it`가 있으면 그것을, 없으면 `sugar-it-desktop daemon`을 실행하도록 등록한다. 데스크톱 패키지에는 CLI가 없고 Finder에서 띄운 앱에는 사용자의 `PATH`가 없으므로 `PATH`는 찾지 않는다.
+- **자동 릴리스:** `main`으로 머지된 PR마다 `auto-release.yml`(`pull_request_target`)이 돈다. 저장소가 공개이고 포크의 `pull_request` 토큰은 읽기 전용이기 때문이다. 쓰기 권한으로 돌므로 PR 헤드를 체크아웃하거나 실행하지 않고, 이미 `main`에 있는 `merge_commit_sha`만 체크아웃한다. PR 문구를 `run:` 스크립트에 넣지 않으며 라벨은 이벤트 파일에서 데이터로 읽는다.
+  - 순서: 머지 커밋에서 CI(`ci.yml`의 `workflow_call`) → 주석 태그 생성과 푸시 → 빌드와 게시(`release.yml`의 `workflow_call`). `GITHUB_TOKEN`으로 푸시한 태그는 다른 워크플로를 시작하지 않으므로 직접 호출하며, 호출된 실행에서는 `GITHUB_REF_NAME`이 `main`이라 모든 잡이 `tag` 입력의 태그를 체크아웃해 쓴다. GoReleaser에는 `GORELEASER_CURRENT_TAG`로 알려 준다. 수동 태그의 `push: tags` 트리거는 그대로다.
+  - 버전: 가장 높은 `vX.Y.Z` 태그에서 올린다(`.github/scripts/next-version.sh`). 태그가 없으면 v0.0.0으로 본다. 라벨 `release:major`가 `release:minor`보다 우선하고 라벨이 없으면 패치다. `no-release`면 실행하지 않는다. 태그가 이미 있거나 머지 커밋에 이미 버전 태그가 있으면 분명히 실패한다. `concurrency`로 직렬화하고 취소하지 않는다.
+  - 평범한 `vX.Y.Z`는 정식 릴리스여야 `/releases/latest`에 나타난다(`prerelease: auto`, 릴리스 잡이 확인).
+  - 데스크톱 자산마다 `<asset>.sha256`을 함께 올린다. `sha256sum` 형식이고 파일 이름만 적으므로 어느 OS에서나 검증된다. 빌드는 `wails build -ldflags "-X main.version=x.y.z"`로 버전을 넣는다.
+- **Windows 앱 내 설치:**
+  - 내려받기: 릴리스의 자산 목록에서 `sugar-it-desktop_windows_amd64_installer.exe`와 `.sha256`을 찾는다. 주소는 정확히 `https://github.com/Jang-Luke/sugar-it/releases/download/<태그>/<이름>`이어야 하고 리디렉션은 https로만 따라간다. 최대 500 MiB이며 새 `os.MkdirTemp` 폴더에 스트리밍해 SHA-256을 확인한다. 체크섬이 없거나 다르면 설치를 거부하고 파일을 지운다. 어느 단계에서 실패해도 앱은 계속 실행되고 `ko.ts`의 오류를 보여 주며, 두 번째 클릭은 무시한다. 서명이 없으므로 HTTPS와 체크섬은 손상만 막을 뿐 저장소가 침해된 경우를 막지 못한다.
+  - 도우미: 실행 중인 exe는 잠겨 있고 설치에는 권한 상승이 필요하다. 앱은 자신을 임시 폴더에 `sugar-it-update-helper.exe`로 복사해 breakaway 방식으로 분리 실행하고(`update-helper --pid --installer --app [--config-dir] [--restart-daemon]`, `desktop/main.go`에서 Wails, 트레이, 단일 인스턴스 잠금보다 먼저 처리), 실제 종료 경로로 끝난다. 도우미는 앱이 끝나기를 최대 60초 기다리고, `ShellExecuteExW`의 `runas`로 설치 파일을 `/S /D=<앱 폴더>`로 실행해 기다린 뒤 앱을 권한 상승 없이 다시 시작한다. `/D=`가 없으면 기본 폴더에 설치되어, 다른 폴더의 앱을 다시 시작할 때 옛 버전이 뜬다. PowerShell이나 숨은 스크립트는 쓰지 않는다. UAC 거부나 설치 실패면 옛 앱을 다시 시작하고, 원인을 설정 폴더의 `update-status.json`에 남겨 앱이 한 번 보여 준다. 임시 폴더는 지울 수 있는 만큼 지우고, 실행 중인 도우미 파일은 한 시간 뒤의 앱 시작에서 지운다. 옛 인스턴스가 끝난 뒤에 다시 시작하고 도우미는 잠금을 잡지 않으므로 단일 인스턴스 잠금이 재시작을 막지 않는다. 다시 시작한 GUI에는 `HideWindow`를 주지 않는다. `STARTUPINFO`의 `SW_HIDE`가 첫 `ShowWindow`에 적용되어 창이 숨겨지기 때문이다.
+  - 데몬: 프로세스 안 데몬은 앱과 함께 정상 종료한다. 앱이 붙어 있는 외부 데몬이 같은 실행 파일이면(`runtime.json`의 PID와 `QueryFullProcessImageNameW`로 판단) 파일을 잠그므로 `Client.Shutdown`으로 멈추고 프로세스가 끝나기를 기다린 뒤, 도우미가 설치 뒤에 `daemon`으로 다시 시작한다. 앱보다 먼저 시작해야 앱이 자체 데몬을 띄우지 않는다. 다른 프로그램(`sugar-it.exe`)의 데몬은 건드리지 않으며 그 버전이 유지된다.
+

@@ -110,3 +110,18 @@ SDD 작업 기록에서 옮긴 목록이다. 작업 기록은 브랜치 완료 �
 - Pre-existing: a pane keeps its old path when the share changes in the share list.
 - Windows uninstall cannot tell "scheduled task absent" from "query failed" (the schtasks message is localized); a failed query is treated as absent.
 - v0.1.2 tray (deferred): reopening from the tray un-maximizes a maximized window because `showWindow` unminimises first; `startTray` runs before the daemon and can delay it 5s; the tray icon stays up to 10s during shutdown; a failed icon load is undetected and shows a blank but clickable slot; a second app with another `--config-dir` is blocked by the single-instance lock; Windows 11 may put the icon in the overflow area, with no first-hide notice; the installer has no running-process check.
+
+## 미룬 항목 (앱 내 업데이트와 자동 릴리스)
+
+- macOS and Linux one-click update: both only open the release page now, because their asset formats and the missing signing make in-place replacement a separate job.
+- Code signing and notarization: builds are unsigned, so the updater's checksum guards only against corruption, not a compromised repository, and SmartScreen and Defender may object.
+- An updater for the `sugar-it` command.
+- The restarted daemon gets only `daemon` and `--config-dir`: `--listen`, `--control`, `--dav` and `--advertise` given by hand are lost. The Run key value has none of them. Control has no way to report them.
+- A daemon of this same `sugar-it-desktop.exe` for another config directory is not found, so it still locks the file. What the silent NSIS installer then does has not been seen: if it ignores the locked file and exits 0, the relaunched app stays on the old version and the banner returns with no message.
+- A renamed copy of the program: the installer writes `sugar-it-desktop.exe` into the same folder, and the relaunch starts the old copy.
+- The NSIS version metadata stays at the default 1.0.0: `wails.json` has no `info.productVersion`, so Add/Remove Programs does not show the release version.
+- Wait for the release to be complete before it becomes latest: the release is visible while the desktop jobs still run, and the banner points to the page until the Windows assets arrive. A draft published by a last job would close that window.
+- GitHub keeps one pending run per concurrency group: three quick merges skip the middle run, and its labels are not applied.
+- A release whose desktop job failed stays published: rerun the failed job. No automatic retry.
+- The installer writes the Start menu and desktop shortcuts on every run, so an update brings back a shortcut the user deleted.
+- The status file holds only the last failure, and the helper does not report a successful update to the new app.
