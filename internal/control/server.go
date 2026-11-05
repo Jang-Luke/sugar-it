@@ -186,7 +186,7 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 // the server that sends it. A daemon hosted by the desktop app is the app's.
 func (s *server) shutdown(w http.ResponseWriter, r *http.Request) {
 	if s.InProcess || s.Deps.Shutdown == nil {
-		writeErr(w, vfs.E(vfs.CodeInvalidRequest, "this daemon runs inside the sugar-it desktop app; close the app to stop it"))
+		writeErr(w, vfs.E(vfs.CodeInvalidRequest, "this daemon runs inside the sugar-it desktop app; quit the app to stop it"))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

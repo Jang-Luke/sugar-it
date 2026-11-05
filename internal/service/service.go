@@ -100,7 +100,7 @@ func Plan(goos, exe, home, configDir string) (Unit, error) {
 		}
 		return Unit{
 			Commands: [][]string{{"reg", "add", runKey, "/v", runValue, "/t", "REG_SZ", "/d", v, "/f"}},
-			Notes:    []string{"sugar-it will start at your next logon. It does not start now; if the desktop app is running the daemon, that continues until the app closes."},
+			Notes:    []string{"sugar-it will start at your next logon. It does not start now; if the desktop app is running the daemon, that continues until the app quits."},
 		}, nil
 	}
 	return Unit{}, fmt.Errorf("services are not supported on %s", goos)
@@ -265,7 +265,7 @@ func StopDaemon(ctx context.Context, d Daemon, wait func(context.Context) error,
 	}
 	if err := d.Shutdown(ctx); err != nil {
 		if vfs.CodeOf(err) == vfs.CodeInvalidRequest {
-			fmt.Fprintln(out, "The daemon runs inside the desktop app, so it keeps running and stops when the app closes.")
+			fmt.Fprintln(out, "The daemon runs inside the desktop app, so it keeps running and stops when the app quits.")
 			return nil
 		}
 		return fmt.Errorf("could not stop the running daemon: %w", err)

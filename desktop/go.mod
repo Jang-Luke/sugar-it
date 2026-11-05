@@ -3,6 +3,7 @@ module sugarintegration/desktop
 go 1.27.3
 
 require (
+	github.com/energye/systray v1.0.3
 	github.com/wailsapp/wails/v2 v2.17.1
 	sugarintegration v0.0.0
 )

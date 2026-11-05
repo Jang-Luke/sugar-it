@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -34,6 +35,8 @@ func main() {
 	configDir := flag.String("config-dir", "", "config directory (default: the user config directory's sugar-it)")
 	flag.Parse()
 	app := NewApp(*configDir)
+	// Also when Run fails: a tray icon must not outlive the process.
+	defer app.stopTray()
 	err := wails.Run(&options.App{
 		Title:     "sugar-it",
 		Width:     1180,
@@ -43,11 +46,20 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
-		Bind:       []any{app},
+		OnStartup:     app.startup,
+		OnShutdown:    app.shutdown,
+		OnBeforeClose: app.beforeClose,
+		// macOS only: closing hides the app and a Dock click shows it. Windows
+		// hides through OnBeforeClose, because it needs the tray; Linux quits.
+		HideWindowOnClose: runtime.GOOS == "darwin",
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId:               singleInstanceID,
+			OnSecondInstanceLaunch: app.secondInstance,
+		},
+		Bind: []any{app},
 	})
 	if err != nil {
+		app.stopTray() // log.Fatal skips deferred calls
 		log.Fatal(err)
 	}
 }

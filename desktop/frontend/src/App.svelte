@@ -87,7 +87,7 @@
   {/if}
   {#if state?.InProcess}
     <div class="top warn">
-      <strong>{ko.banner.inProcess}</strong>
+      <strong>{ko.banner.inProcess(state.Platform, state.CloseHides)}</strong>
       <span class="grow"></span>
       {#if installMsg}<span class="error">{errorText(installMsg.code)} <span class="mono">{installMsg.message}</span></span>{/if}
       <button on:click={installService}>{ko.banner.installService}</button>

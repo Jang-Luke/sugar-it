@@ -684,7 +684,7 @@ func TestShutdownRefusedInProcess(t *testing.T) {
 	}
 	err = c.Shutdown(bg)
 	wantCode(t, err, vfs.CodeInvalidRequest)
-	if err != nil && !strings.Contains(err.Error(), "close the app") {
+	if err != nil && !strings.Contains(err.Error(), "quit the app") {
 		t.Errorf("message does not say to close the app: %v", err)
 	}
 	if _, err := c.Status(bg); err != nil {

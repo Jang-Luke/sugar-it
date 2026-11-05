@@ -31,6 +31,7 @@ export interface Status {
 
 export interface AppState {
   InProcess: boolean
+  CloseHides: boolean
   StartError: string
   Failure: string
   Platform: string

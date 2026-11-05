@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	wailsrt "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -74,6 +75,11 @@ type App struct {
 	home         string // "" means the user's home directory
 	exeDir       string // where to look for the sugar-it command; "" means beside this program
 
+	tray       Tray // nil means none; see tray.go
+	win        windowOps
+	trayActive atomic.Bool // the tray is up, so closing the window may hide it
+	quitting   atomic.Bool // the app is quitting for real: closing must not hide
+
 	mu       sync.Mutex
 	ctx      context.Context
 	be       Backend
@@ -103,6 +109,8 @@ func NewApp(configDir string) *App {
 			return err
 		},
 		goos: runtime.GOOS,
+		tray: newTray(),
+		win:  wailsWindowOps(),
 	}
 }
 
@@ -110,8 +118,12 @@ func NewApp(configDir string) *App {
 // inside this process. Failures are kept and reported by every later call.
 func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.ctx = ctx
+	a.mu.Unlock()
+	// After the context is set: the tray's callbacks call the Wails runtime.
+	a.startTray()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	be, err := a.discover(a.configDir)
 	if err == nil {
 		a.be = be
@@ -144,13 +156,23 @@ func (a *App) startup(ctx context.Context) {
 	}()
 }
 
-// shutdown stops the in-process daemon, if the app started one.
+// shutdown stops the in-process daemon, if the app started one, and then
+// removes the tray icon so that none is left behind. It may run twice.
 func (a *App) shutdown(ctx context.Context) {
+	a.quitting.Store(true)
 	a.mu.Lock()
 	d := a.d
 	a.mu.Unlock()
 	if d != nil {
 		d.Shutdown(ctx)
+	}
+	a.stopTray()
+}
+
+func (a *App) stopTray() {
+	a.trayActive.Store(false)
+	if a.tray != nil {
+		a.tray.Stop()
 	}
 }
 
@@ -235,7 +257,8 @@ func do(a *App, f func(ctx context.Context, b Backend) error) error {
 
 // AppState is what the window needs even when the daemon cannot be reached.
 type AppState struct {
-	InProcess  bool   // closing the app stops sharing
+	InProcess  bool   // quitting the app stops sharing
+	CloseHides bool   // closing the window hides it (Windows tray, macOS) instead of quitting
 	StartError string // the daemon could neither be found nor started
 	Failure    string // the in-process daemon's listener died
 	Platform   string // GOOS
@@ -244,7 +267,7 @@ type AppState struct {
 func (a *App) AppState() AppState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := AppState{InProcess: a.d != nil, Platform: a.goos}
+	s := AppState{InProcess: a.d != nil, Platform: a.goos, CloseHides: a.trayActive.Load() || a.goos == "darwin"}
 	if a.startErr != nil {
 		s.StartError = a.startErr.Error()
 	}
@@ -543,7 +566,7 @@ func (inProcessDaemon) Shutdown(context.Context) error {
 // UninstallService removes the per-user background service. On Linux and
 // macOS that also stops it. On Windows it removes the logon entry (and the
 // v0.1.0 scheduled task) and then asks a running daemon of this config
-// directory to stop, unless this app hosts it: that stops when the app closes.
+// directory to stop, unless this app hosts it: that stops when the app quits.
 func (a *App) UninstallService() (ServiceResult, error) {
 	home := a.home
 	if home == "" {

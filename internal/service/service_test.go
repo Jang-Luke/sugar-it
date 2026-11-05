@@ -487,7 +487,7 @@ func TestStopDaemon(t *testing.T) {
 	}
 	out.Reset()
 	d = &fakeDaemon{err: vfs.E(vfs.CodeInvalidRequest, "the daemon runs inside the desktop app")}
-	if err := service.StopDaemon(ctx, d, nil, &out); err != nil || !strings.Contains(out.String(), "when the app closes") {
+	if err := service.StopDaemon(ctx, d, nil, &out); err != nil || !strings.Contains(out.String(), "when the app quits") {
 		t.Fatalf("in-process: %v %q", err, out.String())
 	}
 	out.Reset()

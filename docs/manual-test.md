@@ -115,8 +115,10 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
 ./desktop/build/bin/sugar-it-desktop --config-dir /tmp/a
 ```
 
-1. With no daemon on `/tmp/a`, the window shows the banner "앱을 닫으면 공유가
-   중단됩니다" with the service button. Start `sugar-it --config-dir /tmp/a
+1. With no daemon on `/tmp/a`, the window shows the banner with the service button. Linux: "앱을 닫으면 공유가
+   중단됩니다". Windows with a working tray, and macOS: "창을 닫아도 공유는
+   계속됩니다. …" (Windows: "트레이 아이콘의 종료를 누르면", macOS: "앱을
+   종료하면"), which is true only if step 14 behaves as written. Start `sugar-it --config-dir /tmp/a
    daemon` first and relaunch: the banner is gone (the app uses that daemon).
 2. Hosts tab, "공유 추가": pick a folder with a few files, name it `docs`.
    It appears in the list. Try a name with capitals: an error message in Korean.
@@ -166,13 +168,13 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     /F`); without elevation that fails and the result shows the command to run
     as administrator. It then asks a daemon answering for this config directory
     to stop and says so; a daemon inside the app is left running until the app
-    closes. Run it twice: the second run says nothing was installed and must
+    quits. Run it twice: the second run says nothing was installed and must
     not fail. A failed install shows "서비스를 설치하거나 제거하지 못했습니다."
     plus the detail. Not yet run on Windows: the scheduled-task removal and the
     daemon stop.
     Other systems: "서비스 설치" installs the per-user service (Linux: `systemctl --user status
     sugar-it`). While the app itself runs the daemon, the service fails to take
-    the config-directory lock and retries every 5 seconds until the app closes.
+    the config-directory lock and retries every 5 seconds until the app quits.
     "서비스 제거" asks first, then stops and removes the service (systemctl
     disable --now on Linux, launchctl unload on macOS).
 12. Kill the in-process daemon's port by starting another process on it before
@@ -235,6 +237,39 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     onto an existing name with the conflict policy `fail`: a notice with a
     button to the transfers tab appears once.
 
+14. Window close, tray and second launch (none of this has been run on a
+    display; the code was only built for Windows from Linux).
+    a. Windows, config dir with no daemon so the app hosts it: click the close
+    button. The window disappears, the tray icon stays (tooltip `sugar-it`),
+    `Get-Process sugar-it-desktop` still lists it, and `sugar-it status` still
+    answers. Left-click the icon: the window returns and has focus. Close it
+    again and double-click the icon: same. Minimize the window, then click the
+    icon: it is restored.
+    b. Right-click the icon: the menu has 열기 and 종료. 열기 shows the window.
+    종료 ends the process, `sugar-it status` stops answering (graceful stop: the
+    ports are free and `runtime.json` is gone), and the icon is gone at once.
+    Hover where the icon was: no ghost icon remains. Click 종료 twice quickly:
+    no error, no second dialog. Also quit while the window is hidden.
+    c. Windows, second launch: with the app running (window visible, then
+    hidden, then minimized), start `sugar-it-desktop.exe` again. No second
+    window or tray icon appears; the existing window is shown and focused each
+    time. `sugar-it-desktop.exe daemon` is not affected and shows no icon.
+    d. Windows, tray failure: hard to provoke. If the notification area is
+    unavailable (for example, no Explorer shell), the app must quit when its
+    window is closed, never hide with no icon. The log line is "tray
+    unavailable, closing the window will quit". If Explorer restarts while the
+    app runs, the icon should return.
+    e. macOS: the close button hides the app and a Dock click brings the window
+    back (`HideWindowOnClose`; from Wails' source, not run). Cmd+Q quits and
+    stops an in-process daemon. No menu bar or tray icon is expected. A second
+    launch shows the existing window. This path is unverified.
+    f. Linux: the close button quits the app and an in-process daemon; there is
+    no tray. A second launch from another terminal shows the existing window
+    and exits.
+    g. The banner text matches the platform as in step 1; the service texts say
+    "종료" where they used to say "닫"; `sugar-it stop` against an in-process
+    daemon says to quit the app.
+
 ## Background daemon (`sugar-it daemon`)
 
 Linux was run by hand with a temporary config directory (start, `status`, a
@@ -248,8 +283,8 @@ second start refused, `stop`, `stop` again). The rest has not been run.
 3. Start with a busy `--control` port: exit 1 and the end of the log on stderr.
 4. `sugar-it --config-dir /tmp/c stop` prints "stopped"; `status` then exits 1,
    the ports are free and `runtime.json` is gone. `stop` again exits 1.
-5. With the desktop app running its own daemon, `sugar-it stop` says to close
-   the app.
+5. With the desktop app running its own daemon, `sugar-it stop` says to quit
+   the app (on Windows closing the window only hides it).
 6. Windows: `sugar-it.exe daemon` from a console returns and leaves no console
    window for the daemon; `Get-Process sugar-it` shows it; `stop` ends it. The
    same with `sugar-it-desktop.exe daemon` started from Explorer or the Run key

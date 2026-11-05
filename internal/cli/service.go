@@ -62,7 +62,7 @@ Windows: deletes the Run key value, and the scheduled task sugar-it v0.1.0
 created if there is one (that may need an administrator prompt). Windows cannot
 stop a process by removing the value, so the command then asks the daemon that
 answers for this config directory to stop; a daemon inside the desktop app
-keeps running until the app closes.`,
+keeps running until the app quits.`,
 			RunE: plain(func(cmd *cobra.Command, _ []string) error {
 				home, err := os.UserHomeDir()
 				if err != nil {

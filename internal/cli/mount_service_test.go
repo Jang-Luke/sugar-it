@@ -159,7 +159,7 @@ func TestWindowsUninstallLeavesAnInProcessDaemon(t *testing.T) {
 	if code := cli.ExecuteWithRunners([]string{"--config-dir", h.dir, "service", "uninstall"}, &out, &errb, &rec{}, &svcRec{}); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "when the app closes") {
+	if !strings.Contains(out.String(), "when the app quits") {
 		t.Fatalf("output %q", out.String())
 	}
 	if _, err := control.Discover(h.dir); err != nil {

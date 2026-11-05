@@ -224,7 +224,7 @@ func TestStopRefusedForInProcessDaemon(t *testing.T) {
 		d.Shutdown(ctx)
 	}()
 	code, _, errs := h.run("stop")
-	if code != 1 || !strings.Contains(errs, "invalid_request") || !strings.Contains(errs, "close the app") {
+	if code != 1 || !strings.Contains(errs, "invalid_request") || !strings.Contains(errs, "quit the app") {
 		t.Errorf("exit %d stderr %q", code, errs)
 	}
 	h.ok("status")

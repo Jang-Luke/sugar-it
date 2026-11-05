@@ -31,7 +31,13 @@ export const ko = {
   tabs: { files: '파일', transfers: '전송', hosts: '호스트·공유' },
 
   banner: {
-    inProcess: '앱을 닫으면 공유가 중단됩니다',
+    // Where closing the window only hides it, quitting is what stops sharing.
+    inProcess: (platform: string, closeHides: boolean) =>
+      !closeHides
+        ? '앱을 닫으면 공유가 중단됩니다'
+        : platform === 'darwin'
+          ? '창을 닫아도 공유는 계속됩니다. 앱을 종료하면 공유가 중단됩니다'
+          : '창을 닫아도 공유는 계속됩니다. 트레이 아이콘의 종료를 누르면 공유가 중단됩니다',
     installService: '서비스로 설치',
     startError: '공유 서비스를 시작하지 못했습니다',
     failure: '공유 서비스가 중단되었습니다',
@@ -206,16 +212,16 @@ export const ko = {
     tokenDialogMessage: '사용자 이름: sugar-it\n암호(토큰): {token}\n\n이 토큰은 다른 사람과 공유하지 마세요.',
     linuxMountNote: 'gio가 토큰을 직접 전달하므로 따로 입력할 필요가 없습니다.',
     serviceTitle: '백그라운드 서비스',
-    serviceHelp: '로그인할 때 sugar-it을 자동으로 실행합니다. 앱을 닫아도 공유가 계속됩니다.',
+    serviceHelp: '로그인할 때 sugar-it을 자동으로 실행합니다. 앱을 종료해도 공유가 계속됩니다.',
     serviceInstall: '서비스 설치',
     serviceDone: '서비스를 설치했습니다.',
     serviceFailed: '서비스를 설치하거나 제거하지 못했습니다.',
-    serviceNextLogon: 'Windows에서는 다음 로그인부터 적용됩니다. 지금 바로 시작하지 않으며, 이 앱이 공유를 실행 중이면 앱을 닫을 때까지 앱이 계속 실행합니다.',
+    serviceNextLogon: 'Windows에서는 다음 로그인부터 적용됩니다. 지금 바로 시작하지 않으며, 이 앱이 공유를 실행 중이면 앱을 종료할 때까지 앱이 계속 실행합니다.',
     serviceUninstall: '서비스 제거',
     serviceUninstallTitle: '서비스 제거',
     serviceUninstallMessage: (platform: string) =>
       platform === 'windows'
-        ? '로그인할 때 실행되는 항목(그리고 v0.1.0이 만든 예약 작업이 있으면 그것도)을 제거하고, 이 설정 폴더로 실행 중인 공유 서비스가 있으면 멈춥니다. 이 앱이 공유를 실행 중이면 앱을 닫을 때 멈춥니다. 예약 작업을 지우려면 관리자 권한이 필요할 수 있습니다. 공유한 폴더와 설정은 그대로 남습니다.'
+        ? '로그인할 때 실행되는 항목(그리고 v0.1.0이 만든 예약 작업이 있으면 그것도)을 제거하고, 이 설정 폴더로 실행 중인 공유 서비스가 있으면 멈춥니다. 이 앱이 공유를 실행 중이면 앱을 종료할 때 멈춥니다. 예약 작업을 지우려면 관리자 권한이 필요할 수 있습니다. 공유한 폴더와 설정은 그대로 남습니다.'
         : platform === 'darwin'
           ? 'LaunchAgent를 내려 서비스를 멈추고 제거합니다. 공유한 폴더와 설정은 그대로 남습니다.'
           : 'systemd 사용자 서비스를 멈추고 제거합니다. 공유한 폴더와 설정은 그대로 남습니다.',
@@ -224,7 +230,7 @@ export const ko = {
       platform === 'windows'
         ? '로그인 항목을 제거했습니다. 서비스가 멈췄는지는 아래 결과를 확인하세요. 이 앱이 서비스에 연결되어 있었다면 앱을 다시 시작하세요.'
         : '서비스를 멈추고 제거했습니다. 이 앱이 서비스에 연결되어 있었다면 앱을 다시 시작하세요.',
-    serviceWaitsForApp: '지금은 이 앱이 공유를 실행하고 있으므로 서비스는 앱을 닫은 뒤에 공유를 이어받습니다.',
+    serviceWaitsForApp: '지금은 이 앱이 공유를 실행하고 있으므로 서비스는 앱을 종료한 뒤에 공유를 이어받습니다.',
     output: '실행 결과',
     notes: '안내',
   },

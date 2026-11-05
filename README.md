@@ -29,6 +29,17 @@ Tagged releases are meant to provide the following. The first two items are buil
   `sugar-it` command. The app's service button runs the app's own binary as the
   daemon (`sugar-it-desktop daemon`, no window; it detaches like `sugar-it daemon`), or a `sugar-it` beside it.
 
+Desktop window behaviour: only one desktop app runs at a time; starting it a
+second time shows (and focuses) the existing window, also when it is hidden. On
+Windows, the close button hides the window and the app keeps running, with the
+daemon if the app hosts it, behind a notification-area (tray) icon: a left
+click or double click shows the window, and the menu has 열기 and 종료. 종료
+quits the app, stops an in-process daemon gracefully and removes the icon. If the
+tray cannot start, closing the window quits. On macOS, closing hides the app
+(Wails' `HideWindowOnClose`) and a Dock click shows it; there is no tray, and
+Cmd+Q quits. On Linux, closing the window quits. None of this has been seen on a
+display yet; see `docs/manual-test.md`.
+
 Build the desktop app yourself (Linux needs `libgtk-3-dev` and
 `libwebkit2gtk-4.1-dev`; the frontend must be built first because `main.go`
 embeds `frontend/dist`; `wails build` creates `frontend/wailsjs` itself):
@@ -102,7 +113,7 @@ end of the log and exits 1. `sugar-it stop` stops it gracefully through the
 Control API and waits until it is gone. `sugar-it daemon --foreground` keeps the
 old behaviour (runs in the terminal until Ctrl-C or SIGTERM); the systemd and
 launchd units use it. A daemon hosted by the desktop app cannot be stopped with
-`stop`: close the app.
+`stop`: quit the app (on Windows, closing the window only hides it to the tray).
 
 A daemon started before this change runs in a terminal and has no `stop`
 endpoint: stop it with Ctrl-C (or restart it once), then start the new one.
@@ -211,7 +222,7 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
 - `sugar-it service uninstall` on Windows removing a v0.1.0 scheduled task, and
   the error when that needs an administrator. Uninstall stops the service on Linux and
   macOS. On Windows it asks a running daemon to stop, and a daemon inside the
-  desktop app keeps running until the app closes.
+  desktop app keeps running until the app quits.
 - `sugar-it service install` on Windows actually starting the daemon at logon.
   The Run key value was written with correct quoting and removed again, from an
   administrator session. A non-administrator has not been tried.

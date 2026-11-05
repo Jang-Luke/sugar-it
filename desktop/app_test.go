@@ -40,6 +40,7 @@ func newApp(t *testing.T, dir string) *App {
 	t.Helper()
 	a := NewApp(dir)
 	a.opts = loopback
+	a.tray = nil // never a real tray in tests
 	return a
 }
 
@@ -607,7 +608,7 @@ func TestWindowsUninstallLeavesTheAppsOwnDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Output, "when the app closes") {
+	if !strings.Contains(res.Output, "when the app quits") {
 		t.Errorf("output %q", res.Output)
 	}
 	if _, err := a.Status(); err != nil {
