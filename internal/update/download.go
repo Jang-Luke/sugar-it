@@ -42,32 +42,36 @@ type Downloader struct {
 	MaxSize int64         // 0 means MaxInstallerSize
 }
 
+// Downloaded is a verified installer. The helper checks SHA256 again just before it
+// runs the file, which stays in a temporary folder through the app's exit and UAC.
+type Downloaded struct{ Path, SHA256 string }
+
 // Installer downloads rel's installer into dir and verifies it. On any failure no
 // file is left. progress, if set, is called from this goroutine as bytes arrive.
-func (d Downloader) Installer(ctx context.Context, rel Release, dir string, progress func(done, total int64)) (string, error) {
+func (d Downloader) Installer(ctx context.Context, rel Release, dir string, progress func(done, total int64)) (Downloaded, error) {
 	max := d.MaxSize
 	if max == 0 {
 		max = MaxInstallerSize
 	}
 	if rel.Installer == nil || rel.Installer.URL != assetURL(rel.Tag, InstallerAsset) {
-		return "", ErrNoInstaller
+		return Downloaded{}, ErrNoInstaller
 	}
 	if rel.Checksum == nil || rel.Checksum.URL != assetURL(rel.Tag, ChecksumAsset) {
-		return "", ErrNoChecksum
+		return Downloaded{}, ErrNoChecksum
 	}
 	if rel.Installer.Size > max {
-		return "", ErrTooLarge
+		return Downloaded{}, ErrTooLarge
 	}
 	want, err := d.checksum(ctx, rel.Checksum.URL)
 	if err != nil {
-		return "", err
+		return Downloaded{}, err
 	}
 	path := filepath.Join(dir, InstallerAsset)
 	if err := d.fetch(ctx, rel.Installer, path, want, max, progress); err != nil {
 		os.Remove(path)
-		return "", err
+		return Downloaded{}, err
 	}
-	return path, nil
+	return Downloaded{Path: path, SHA256: want}, nil
 }
 
 func (d Downloader) checksum(ctx context.Context, url string) (string, error) {

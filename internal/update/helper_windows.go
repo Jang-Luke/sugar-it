@@ -5,6 +5,8 @@ package update
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -24,7 +26,26 @@ const (
 var procShellExecuteExW = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
 
 func platformOps() (HelperOps, error) {
-	return HelperOps{WaitExit: WaitExit, RunElevated: runElevated}, nil
+	return HelperOps{WaitExit: WaitExit, Hold: holdInstaller, RunElevated: runElevated}, nil
+}
+
+func holdInstaller(file, want string) (io.Closer, error) {
+	return HoldVerified(openDenyWrite, file, want)
+}
+
+// openDenyWrite opens a file so that nobody can write, rename or delete it while the
+// handle lasts. Starting a program needs read and execute access, which FILE_SHARE_READ
+// allows, so this should not keep it from running; ErrInstallerBusy covers it if it does.
+func openDenyWrite(path string) (*os.File, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(h), path), nil
 }
 
 // WaitExit waits for the process to exit. One that is already gone counts.
@@ -105,6 +126,9 @@ func runElevated(file, params string) (int, error) {
 	if r == 0 {
 		if errors.Is(callErr, windows.ERROR_CANCELLED) {
 			return 0, ErrElevationDenied
+		}
+		if errors.Is(callErr, windows.ERROR_SHARING_VIOLATION) {
+			return 0, ErrInstallerBusy
 		}
 		return 0, fmt.Errorf("start the installer: %w", callErr)
 	}

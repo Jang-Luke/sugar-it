@@ -86,7 +86,7 @@ func TestDownloadVerifiesAndReportsProgress(t *testing.T) {
 	var last atomic.Int64
 	rel := testRelease()
 	rel.Installer.Size = int64(len(data))
-	path, err := Downloader{HTTP: c}.Installer(context.Background(), rel, dir, func(done, total int64) {
+	got0, err := Downloader{HTTP: c}.Installer(context.Background(), rel, dir, func(done, total int64) {
 		last.Store(done)
 		if total != int64(len(data)) {
 			t.Errorf("total %d", total)
@@ -95,8 +95,13 @@ func TestDownloadVerifiesAndReportsProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := got0.Path
 	if filepath.Dir(path) != dir || filepath.Base(path) != InstallerAsset {
 		t.Errorf("path %s", path)
+	}
+	want := sha256.Sum256(data)
+	if got0.SHA256 != hex.EncodeToString(want[:]) {
+		t.Errorf("SHA256 %s", got0.SHA256)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, data) {
