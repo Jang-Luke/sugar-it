@@ -13,7 +13,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 
 	"sugarintegration/internal/cli"
+	"sugarintegration/internal/update"
 )
+
+// version is the release version: release builds set it with
+// -ldflags "-X main.version=x.y.z". A development build looks for no updates.
+var version = "dev"
 
 //go:embed all:frontend/dist
 var assets embed.FS
@@ -28,8 +33,22 @@ func runDaemon(args []string, stdout, stderr io.Writer) (code int, handled bool)
 	return cli.Execute(args, stdout, stderr), true
 }
 
+// runUpdateHelper handles the first argument update-helper: a copy of this program
+// that replaces the installed one once it has exited (update.RunHelper). Like the
+// daemon it never reaches Wails, so it opens no window and takes no tray icon, and
+// it does not hold the single-instance lock when it starts the new app.
+func runUpdateHelper(args []string, stderr io.Writer) (code int, handled bool) {
+	if len(args) == 0 || args[0] != update.HelperCommand {
+		return 0, false
+	}
+	return update.HelperMain(args[1:], stderr), true
+}
+
 func main() {
 	if code, handled := runDaemon(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
+	if code, handled := runUpdateHelper(os.Args[1:], os.Stderr); handled {
 		os.Exit(code)
 	}
 	configDir := flag.String("config-dir", "", "config directory (default: the user config directory's sugar-it)")

@@ -25,6 +25,7 @@ import (
 	"sugarintegration/internal/service"
 	"sugarintegration/internal/shares"
 	"sugarintegration/internal/transfer"
+	"sugarintegration/internal/update"
 	"sugarintegration/internal/vfs"
 )
 
@@ -80,6 +81,9 @@ type App struct {
 	trayActive atomic.Bool // the tray is up, so closing the window may hide it
 	quitting   atomic.Bool // the app is quitting for real: closing must not hide
 
+	version string // this build's version; see update.go
+	upd     updater
+
 	mu       sync.Mutex
 	ctx      context.Context
 	be       Backend
@@ -111,6 +115,9 @@ func NewApp(configDir string) *App {
 		goos: runtime.GOOS,
 		tray: newTray(),
 		win:  wailsWindowOps(),
+
+		version: version,
+		upd:     updater{deps: defaultUpdateDeps(version), interval: update.CheckInterval},
 	}
 }
 
@@ -122,6 +129,7 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Unlock()
 	// After the context is set: the tray's callbacks call the Wails runtime.
 	a.startTray()
+	a.startUpdates()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	be, err := a.discover(a.configDir)
@@ -160,6 +168,7 @@ func (a *App) startup(ctx context.Context) {
 // removes the tray icon so that none is left behind. It may run twice.
 func (a *App) shutdown(ctx context.Context) {
 	a.quitting.Store(true)
+	a.stopUpdates()
 	a.mu.Lock()
 	d := a.d
 	a.mu.Unlock()
@@ -262,12 +271,14 @@ type AppState struct {
 	StartError string // the daemon could neither be found nor started
 	Failure    string // the in-process daemon's listener died
 	Platform   string // GOOS
+	Update     UpdateInfo
 }
 
 func (a *App) AppState() AppState {
+	info := a.updateInfo()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := AppState{InProcess: a.d != nil, Platform: a.goos, CloseHides: a.trayActive.Load() || a.goos == "darwin"}
+	s := AppState{InProcess: a.d != nil, Platform: a.goos, CloseHides: a.trayActive.Load() || a.goos == "darwin", Update: info}
 	if a.startErr != nil {
 		s.StartError = a.startErr.Error()
 	}

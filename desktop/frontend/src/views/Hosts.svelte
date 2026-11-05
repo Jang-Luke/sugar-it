@@ -4,6 +4,7 @@
   import { describeMount, mountFailure, serviceFailure, type MountView } from '../lib/mount'
   import { parseError, type Api, type ApiError, type AppState, type MountResult, type ShareInfo, type Status } from '../lib/api'
   import { errorText } from '../lib/transfers'
+  import { checkMessage, updateErrorText } from '../lib/update'
   import { formatTime } from '../lib/format'
   import Dialog from '../components/Dialog.svelte'
 
@@ -11,7 +12,7 @@
   export let status: Status | null = null
   export let state: AppState | null = null
 
-  const dispatch = createEventDispatcher<{ changed: void }>()
+  const dispatch = createEventDispatcher<{ changed: void; updateFound: void }>()
 
   let shares: ShareInfo[] = []
   let err: ApiError | null = null
@@ -30,6 +31,9 @@
   let serviceOutput = ''
   let serviceError: { heading: string; detail: string } | null = null
   let newName = ''
+  let checking = false
+  let checkInfo = ''
+  let checkErr: ApiError | null = null
   let confirm: null | { kind: 'peer' | 'share' | 'service'; name: string } = null
 
   $: dialog = confirm?.kind === 'peer'
@@ -194,6 +198,22 @@
     await run(() => api.showMountToken(ko.hosts.tokenDialogTitle, ko.hosts.tokenDialogMessage))
   }
 
+  // The user asked, so unlike the scheduled check this one reports what happened.
+  async function checkNow() {
+    checking = true
+    checkInfo = ''
+    checkErr = null
+    try {
+      const u = await api.checkUpdate()
+      checkInfo = checkMessage(u)
+      if (u.Available) dispatch('updateFound')
+    } catch (e) {
+      checkErr = parseError(e)
+    } finally {
+      checking = false
+    }
+  }
+
   async function installService() {
     const r = await svcRun(() => api.installService())
     if (r) {
@@ -223,6 +243,14 @@
       <div class="row rename">
         <input placeholder={ko.hosts.renameLabel} title={ko.hosts.renameHint} bind:value={newName} />
         <button disabled={busy || newName.trim() === ''} on:click={renameSelf}>{ko.hosts.renameButton}</button>
+      </div>
+    {/if}
+    {#if state?.Update}
+      <div class="row appversion">
+        <span class="muted">{ko.update.appVersion}</span><span>{state.Update.Current}</span>
+        <button disabled={checking} on:click={checkNow}>{checking ? ko.update.checking : ko.update.checkNow}</button>
+        {#if checkInfo}<span>{checkInfo}</span>{/if}
+        {#if checkErr}<span class="error">{updateErrorText(checkErr.code)} <span class="muted mono">{checkErr.message}</span></span>{/if}
       </div>
     {/if}
   </div>
@@ -366,6 +394,6 @@
   .grow { flex: 1; min-width: 0; }
   .sub { margin-top: 16px; }
   .wide { width: 100%; display: block; margin: 6px 0; }
-  .addshare, .rename { margin-top: 10px; }
+  .addshare, .rename, .appversion { margin-top: 10px; }
   .out { background: var(--bg); padding: 8px; border-radius: 6px; white-space: pre-wrap; margin: 4px 0; }
 </style>

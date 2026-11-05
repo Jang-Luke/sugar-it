@@ -46,6 +46,55 @@ export const ko = {
     retry: '다시 시도',
   },
 
+  update: {
+    // Windows installs from the app. macOS and Linux open the release page: their
+    // asset formats and the missing code signing make replacing the app in place
+    // a separate job.
+    available: (version: string, platform: string, oneClick: boolean) =>
+      oneClick
+        ? `새 버전 ${version}이(가) 있습니다.`
+        : platform === 'windows'
+          ? `새 버전 ${version}이(가) 있습니다. 이 릴리스의 설치 파일이 아직 준비되지 않았으니 릴리스 페이지에서 확인하세요.`
+          : `새 버전 ${version}이(가) 있습니다. 이 OS는 배포 형식이 다르고 코드 서명이 없어 앱 안에서 바로 설치하지 않습니다. 릴리스 페이지에서 내려받으세요.`,
+    install: '업데이트',
+    later: '나중에',
+    openPage: '릴리스 페이지 열기',
+    confirmTitle: '업데이트 설치',
+    confirmMessage: (activeTransfers: number) =>
+      '앱이 다시 시작되고 공유가 잠시 멈춥니다. Windows가 설치 권한을 물어봅니다.' +
+      (activeTransfers > 0 ? ` 진행 중인 전송 ${activeTransfers}건은 다시 시작한 뒤 이어서 진행됩니다.` : ''),
+    downloading: (percent: number | null) => (percent === null ? '내려받는 중…' : `내려받는 중… ${percent}%`),
+    preparing: '설치를 준비하는 중입니다. 곧 앱이 다시 시작됩니다.',
+    appVersion: '앱 버전',
+    checkNow: '지금 확인',
+    checking: '확인하는 중…',
+    upToDate: '최신 버전입니다.',
+    newer: (version: string) => `새 버전 ${version}이(가) 있습니다.`,
+    failed: '업데이트하지 못했습니다. 앱은 계속 실행 중입니다.',
+    errors: {
+      update_dev: '개발 빌드는 업데이트를 확인하지 않습니다.',
+      update_unsupported: '이 OS에서는 앱 안에서 설치할 수 없습니다. 릴리스 페이지에서 내려받으세요.',
+      update_none: '설치할 새 버전이 없습니다.',
+      update_check_failed: '업데이트를 확인하지 못했습니다.',
+      update_no_release: '아직 공개된 릴리스가 없습니다.',
+      update_no_installer: '이 릴리스에는 설치 파일이 없습니다.',
+      update_download_failed: '설치 파일을 내려받지 못했습니다.',
+      update_too_large: '설치 파일이 허용된 크기(500 MiB)보다 큽니다.',
+      update_no_checksum: '설치 파일의 체크섬이 없어 설치하지 않습니다. 내려받은 파일은 삭제했습니다.',
+      update_checksum_mismatch: '설치 파일이 체크섬과 달라 설치하지 않습니다. 내려받은 파일은 삭제했습니다.',
+      update_helper_failed: '업데이트 도우미를 시작하지 못했습니다.',
+      update_daemon_stop_failed: '이 프로그램으로 실행 중인 공유 서비스를 멈추지 못했습니다.',
+      update_bad_url: '릴리스 페이지 주소가 올바르지 않아 열지 않았습니다.',
+    },
+    // The helper has no window; the app it starts again says what happened.
+    notices: {
+      update_denied: '설치 권한을 허용하지 않아 업데이트하지 않았습니다. 이전 버전을 계속 사용합니다.',
+      update_installer_failed: '설치 프로그램이 실패했습니다. 이전 버전이 그대로인지 확인하세요.',
+      update_timeout: '앱이 제때 종료되지 않아 업데이트하지 않았습니다.',
+      other: '이전 업데이트가 끝나지 않았습니다.',
+    },
+  },
+
   common: {
     local: '이 컴퓨터',
     cancel: '취소',

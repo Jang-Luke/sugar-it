@@ -29,12 +29,25 @@ export interface Status {
   InProcess: boolean
 }
 
+export interface UpdateInfo {
+  Current: string
+  Latest: string
+  Available: boolean
+  OneClick: boolean
+  Phase: '' | 'downloading' | 'preparing'
+  Done: number
+  Total: number
+  Notice: string
+  NoticeDetail: string
+}
+
 export interface AppState {
   InProcess: boolean
   CloseHides: boolean
   StartError: string
   Failure: string
   Platform: string
+  Update: UpdateInfo
 }
 
 export interface ShareInfo {
@@ -120,6 +133,11 @@ export interface Api {
   showMountToken(title: string, message: string): Promise<void>
   installService(): Promise<ServiceResult>
   uninstallService(): Promise<ServiceResult>
+  checkUpdate(): Promise<UpdateInfo>
+  /** Resolves at once when one is already running; on success the app quits. */
+  applyUpdate(): Promise<void>
+  openReleasePage(): Promise<void>
+  dismissUpdateNotice(): Promise<void>
 }
 
 /** Binding errors are JSON {"code","message"}; anything else is an internal error. */
@@ -172,5 +190,9 @@ export function wailsApi(): Api {
     showMountToken: (t, m) => c('ShowMountToken', t, m),
     installService: () => c('InstallService'),
     uninstallService: () => c('UninstallService'),
+    checkUpdate: () => c('CheckUpdate'),
+    applyUpdate: () => c('ApplyUpdate'),
+    openReleasePage: () => c('OpenReleasePage'),
+    dismissUpdateNotice: () => c('DismissUpdateNotice'),
   }
 }
