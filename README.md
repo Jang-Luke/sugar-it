@@ -252,6 +252,10 @@ unsigned, in `%TEMP%`, and run over SSH, so an installed copy may behave
 differently; this has not been tested. If it happens to you, Windows Security
 shows the detection.
 
+**Upgrading the Windows app**: from v0.1.2, closing the window keeps the app in
+the tray, which keeps `sugar-it-desktop.exe` locked. Choose 종료 from the tray
+menu before running a new installer.
+
 **Upgrading from v0.1.0**: `sugar-it daemon` now detaches, so a service
 installed by v0.1.0 stops working: run `sugar-it service install` again to
 rewrite it, which adds `--foreground` on Linux and macOS. On Windows, run

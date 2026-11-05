@@ -109,3 +109,4 @@ SDD 작업 기록에서 옮긴 목록이다. 작업 기록은 브랜치 완료 �
 - Go notes and command output are English in the Korean GUI.
 - Pre-existing: a pane keeps its old path when the share changes in the share list.
 - Windows uninstall cannot tell "scheduled task absent" from "query failed" (the schtasks message is localized); a failed query is treated as absent.
+- v0.1.2 tray (deferred): reopening from the tray un-maximizes a maximized window because `showWindow` unminimises first; `startTray` runs before the daemon and can delay it 5s; the tray icon stays up to 10s during shutdown; a failed icon load is undetected and shows a blank but clickable slot; a second app with another `--config-dir` is blocked by the single-instance lock; Windows 11 may put the icon in the overflow area, with no first-hide notice; the installer has no running-process check.
