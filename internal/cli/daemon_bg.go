@@ -16,6 +16,7 @@ import (
 	"sugarintegration/internal/config"
 	"sugarintegration/internal/control"
 	"sugarintegration/internal/daemon"
+	"sugarintegration/internal/detach"
 )
 
 const (
@@ -110,15 +111,9 @@ func (e *env) startBackground(ctx context.Context, o daemonFlags) error {
 		c.Stdout, c.Stderr = lf, lf
 		return c
 	}
-	cmd := newChild()
-	detach(cmd, true)
-	if err := cmd.Start(); err != nil {
-		// A job object can forbid breakaway on Windows; start inside it instead.
-		cmd = newChild()
-		detach(cmd, false)
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start the daemon: %w", err)
-		}
+	cmd, err := detach.Start(newChild)
+	if err != nil {
+		return fmt.Errorf("start the daemon: %w", err)
 	}
 	exited := make(chan struct{})
 	go func() { cmd.Wait(); close(exited) }()

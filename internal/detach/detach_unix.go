@@ -1,14 +1,14 @@
 //go:build unix
 
-package cli
+package detach
 
 import (
 	"os/exec"
 	"syscall"
 )
 
-// detach puts the child in a session of its own: no controlling terminal, so
+// apply puts the child in a session of its own: no controlling terminal, so
 // closing the terminal or Ctrl-C does not reach it.
-func detach(cmd *exec.Cmd, _ bool) {
+func apply(cmd *exec.Cmd, _, _ bool) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
