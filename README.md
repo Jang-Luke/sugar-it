@@ -85,9 +85,14 @@ check is only logged; a failed 지금 확인 says why.
   the installer and its `.sha256`, verifies it, quits and starts a small helper,
   a copy of itself in a temporary folder. The helper waits for the app to exit,
   runs the installer silently after the UAC prompt, into the folder the app ran
-  from, and starts the app again. If you refuse the prompt or the installer fails,
-  the old app comes back and says so. A checksum that is missing or does not match
-  refuses the install and deletes the file.
+  from, checks that the program file really changed, and starts the app again. If you
+  refuse the prompt, the installer fails, or it leaves the file unchanged (silent NSIS
+  skips a file that is in use and still reports success, for instance when another
+  user runs the app), the old app comes back, says so, and offers the release page. A
+  checksum that is missing or does not match refuses the install and deletes the file.
+  If the app does not exit within 60 seconds nothing is installed and the running app
+  says so. If the helper does not start, for instance because an antivirus removed it,
+  the update fails and the app keeps running.
 - **macOS and Linux**: the banner's button opens the release page and you install it
   yourself. Their asset formats and the missing code signing make safe in-place
   replacement a separate job.
@@ -97,7 +102,8 @@ Daemons: a daemon inside the app stops with it. An external daemon started from 
 same `sugar-it-desktop.exe`, such as the logon entry the service button adds, locks
 the file, so it is stopped gracefully before the update and started again by
 `daemon` afterwards, with `--config-dir` but without any other flags it was started
-with. An external `sugar-it.exe` is not touched and keeps its version.
+with. If it cannot be started again, the app says that sharing may be off. An
+external `sugar-it.exe` is not touched and keeps its version.
 
 **Privacy**: the app contacts `api.github.com` at startup and every 6 hours,
 unauthenticated, with the `User-Agent` `sugar-it-desktop/<version>` and nothing about
@@ -109,25 +115,43 @@ transit. They do not guard against a compromised repository: the checksum comes 
 the same release as the installer, and builds are unsigned. Trusting the update means
 trusting this GitHub repository, as it does for a manual download.
 
+The helper checks the installer's hash again just before running it, holding the file
+open so that nobody can write to it until it has started, because it waits in a
+temporary folder through the app's exit and the UAC prompt. Should that handle keep
+the installer from starting, the helper hashes it once more and starts it without
+the handle, which leaves a short gap. A process running as the same user is out of
+scope: it can already reach your files and the app's configuration.
+
 ## Releasing
 
-Merging a pull request into `main` publishes a release (`auto-release.yml`): the CI
-suite runs on the merge commit, then the annotated tag is pushed, then everything is
-built and published as a full release. The version goes up from the highest `vX.Y.Z`
-tag, by the pull request's labels:
+**Merging a pull request into `main` publishes a release** (`auto-release.yml`). The
+CI suite runs on the merge commit, then the annotated tag is pushed, then everything
+is built and published as a full release. `main` is not protected, so review a merge
+as a publish: the merge commit's tests, build scripts and `.github/scripts` all run,
+and those of the tag and build jobs run with `contents: write`.
+
+The version goes up from the highest `vX.Y.Z` tag, by the pull request's labels, which
+exist in the repository:
 
 - no label: patch
 - `release:minor`: minor
 - `release:major`: major, also when `release:minor` is there too
 - `no-release`: nothing is run
 
-Failed CI means no tag and no release. A tag that already exists, or a merge commit
-that already has a version tag, fails clearly and nothing new is tagged. Merges queue
-up. GitHub keeps only one pending run, so a third merge during a run replaces the
-second's pending run, and the second's commit ships in the third's release under the
-third's labels. Pushing a tag by hand still works: `git tag -a vX.Y.Z -m vX.Y.Z` and
-push it. A tag with a suffix such as `v1.2.3-rc1` becomes a pre-release, which the app
-does not offer.
+Failed CI means no tag and no release. Tagging fails clearly, and nothing is tagged,
+if the tag exists, if the merge commit already has a version tag, or if the highest
+tag is not in the commit's history, so re-running an old failed run cannot publish
+older code as the newest. CI runs twice per merge, for the push and for this workflow;
+that only costs runner minutes.
+
+Merges that release queue up: a running one is never cancelled. GitHub keeps only one
+pending run, so a third such merge during a run replaces the second's pending run, and
+the second's commit ships in the third's release under the third's labels. A pull
+request that is closed without merging, or merged with `no-release`, does not take
+part and cannot displace a pending release.
+
+Pushing a tag by hand still works: `git tag -a vX.Y.Z -m vX.Y.Z` and push it. A tag
+with a suffix such as `v1.2.3-rc1` becomes a pre-release, which the app does not offer.
 
 The workflow runs from `main` with write access, so it never checks out a pull
 request's head, only the merge commit, and passes no pull request text to a script.
@@ -275,14 +299,15 @@ archives and the deb and rpm packages, and `checksums.txt` matches them.
 
 **Not verified**:
 
-- `auto-release.yml` has never run, nor `release.yml` through `workflow_call`, nor the
-  new checksums. The YAML was parsed and the version script is tested; `actionlint`
+- `auto-release.yml` has never run, nor its concurrency expression, nor `release.yml`
+  through `workflow_call`, nor the new checksums. The YAML was parsed and the version script is tested; `actionlint`
   was not available. `changelog: github-native` and `prerelease: auto` in
   `.goreleaser.yaml` were not run either.
 - The Windows update has never run on Windows: the download, the UAC prompt, the
   silent install with `/D=`, the relaunch, the daemon restart, how Defender treats a
-  helper in the temporary folder, and what the NSIS installer does when a file stays
-  locked. Its logic is tested on Linux with fakes and it cross-compiles. See
+  helper in the temporary folder, whether the held handle lets the installer start, and
+  the installer's behaviour with a locked file, which is known only from NSIS's source.
+  Its logic is tested on Linux with fakes and it cross-compiles. See
   `docs/manual-test.md`.
 - The docker `dpkg -i` install check has never been run. The amd64 deb was
   unpacked instead: it holds only `/usr/bin/sugar-it`, has no maintainer

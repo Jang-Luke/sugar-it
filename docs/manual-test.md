@@ -326,11 +326,20 @@ the logic with fakes; only these steps touch GitHub, UAC and the installer.
    `sugar-it-desktop.exe daemon` runs again from the new file and the app is attached
    to it. With `--config-dir`, the same directory is used again. Repeat with
    `sugar-it.exe daemon`: that process is not touched and keeps its version.
-9. Windows, keep the program locked by something else, such as a daemon of another
-   config directory: note what the silent installer reports. The old version must not
-   be left half replaced without a message.
+9. Windows, keep the program locked by something else: a second user running the app,
+   a daemon of another config directory, or reopen the app during the UAC prompt. The
+   installer exits 0 without replacing the file. The app must say the install failed
+   and offer the release page (a reopened app shows it within seconds).
 10. Corrupt path: serve a wrong `.sha256` through a test release. The install is
     refused, the app keeps running, and nothing stays in `%TEMP%`.
+11. Change the installer in `%TEMP%` during the UAC wait or before it. It must not run,
+    or a write must be refused while the helper holds it. Note whether the installer
+    starts at all with the handle held; if the first attempt fails with a sharing
+    violation, the helper tries again unheld, which shows as a second UAC prompt.
+12. Hold the app past 60 seconds (`--pid` of another process through a hand-started
+    helper): nothing is installed or relaunched, and the running app shows the notice.
+13. Make Defender or a rename remove the helper as it starts: within 15 seconds the
+    update fails, the app keeps running and a stopped daemon is back.
 
 ## Automatic release
 
@@ -340,4 +349,6 @@ runs). Check that CI ran on the merge commit before the tag appeared, that the r
 is not a pre-release, and that each desktop asset has a `.sha256` that verifies:
 `sha256sum -c sugar-it-desktop_linux_amd64.sha256`. Also check that
 `sugar-it-desktop` shows the version of the tag. Pushing a tag by hand must still
-release. A failing test must leave no tag.
+release. A failing test must leave no tag. Re-run an old failed run after a newer release: it
+must fail at the tag step. Close a pull request unmerged during a queued release: the
+pending release must still run.
