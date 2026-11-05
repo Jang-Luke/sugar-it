@@ -51,3 +51,32 @@ export function pollJobs(
     if (timer !== undefined) clearTimeout(timer)
   }
 }
+
+/**
+ * Finds transfers that have just ended with an error (failed or partial), so
+ * the Files view can stay quiet until one does. A failure counts once: when a
+ * job seen active ends that way, or when a job started here (track) is first
+ * seen already ended, since it can finish between two polls of the job list.
+ * Failures from before the first look, or from elsewhere, are not news.
+ */
+export function jobFailureWatcher() {
+  const seen = new Map<string, string>()
+  const tracked = new Set<string>()
+  return {
+    track(id: string) {
+      tracked.add(id)
+    },
+    update(jobs: Job[]): Job[] {
+      const failed = jobs.filter((j) => {
+        if (j.State !== 'failed' && j.State !== 'partial') return false
+        const before = seen.get(j.ID)
+        return before === undefined ? tracked.has(j.ID) : ACTIVE_STATES.includes(before)
+      })
+      for (const j of jobs) {
+        seen.set(j.ID, j.State)
+        tracked.delete(j.ID)
+      }
+      return failed
+    },
+  }
+}

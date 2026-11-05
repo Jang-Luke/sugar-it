@@ -5,7 +5,7 @@
   import { deletePrompt, isMacPlatform, dropOperation, joinPath, planDrop, snapshotSelection, targetOf, type DropRefusal, type Pane } from '../lib/panes'
   import { actionStates, contextSelection } from '../lib/menu'
   import { jobsChanged } from '../lib/refresh'
-  import { errorText } from '../lib/transfers'
+  import { errorText, jobFailureWatcher } from '../lib/transfers'
   import ContextMenu from '../components/ContextMenu.svelte'
   import Dialog from '../components/Dialog.svelte'
   import PaneView from '../components/PaneView.svelte'
@@ -28,7 +28,7 @@
   let conflict: Conflict = 'fail'
   let dragSrc: Pane | null = null
   let dragEntries: Entry[] = []
-  let notice: { ok: boolean; text: string; detail?: string } | null = null
+  let notice: { text: string; detail?: string; transfers?: boolean } | null = null
   // A dialog acts on what was selected when it opened, not on what the pane shows later.
   let dialog: null | { kind: 'delete' | 'rename' | 'mkdir'; pane: Pane; entries: Entry[]; view: PaneView } = null
   let busy = false
@@ -54,9 +54,17 @@
   }
   $: onJobs(jobs)
 
+  // Starting a transfer shows nothing; only one that ends with an error does.
+  const failures = jobFailureWatcher()
+  function onFailures(js: Job[]) {
+    const failed = failures.update(js)
+    if (failed.length > 0) notice = { text: ko.files.jobsFailed(failed.length), transfers: true }
+  }
+  $: onFailures(jobs)
+
   function fail(e: unknown) {
     const err: ApiError = parseError(e)
-    notice = { ok: false, text: errorText(err.code), detail: err.message }
+    notice = { text: errorText(err.code), detail: err.message }
   }
 
   function refusalText(r: DropRefusal): string {
@@ -67,7 +75,7 @@
   function startTransfer(op: 'copy' | 'move', from: Pane, entries: Entry[], to: Pane, over: Entry | null = null) {
     const plan = planDrop(from, entries, to, over)
     if (!plan.ok) {
-      notice = { ok: false, text: refusalText(plan.reason) }
+      notice = { text: refusalText(plan.reason) }
       return Promise.resolve()
     }
     // Fix the sources and the target now: navigating or refreshing while jobs
@@ -80,12 +88,14 @@
       let started = 0
       try {
         for (const s of srcs) {
-          await api.startJob(op, s, dstTarget, policy)
+          const job = await api.startJob(op, s, dstTarget, policy)
+          failures.track(job.ID)
           started++
         }
-        notice = { ok: true, text: ko.files.started(started, op === 'copy' ? ko.files.opCopy : ko.files.opMove) }
       } catch (e) {
         fail(e)
+        // Some of the selection is already on its way; say where to find it.
+        if (started > 0 && notice) notice = { ...notice, transfers: true }
       } finally {
         busy = false
       }
@@ -102,7 +112,7 @@
     if (!from) return
     const plan = planDrop(from, entries, to, d.over)
     if (!plan.ok) {
-      notice = { ok: false, text: refusalText(plan.reason) }
+      notice = { text: refusalText(plan.reason) }
       return
     }
     void startTransfer(dropOperation(from, plan.dest, d), from, entries, to, d.over)
@@ -160,15 +170,15 @@
 
   function askFor(kind: 'delete' | 'rename' | 'mkdir', p: Pane, sel: Entry[], view: PaneView) {
     if (p.share === '') {
-      notice = { ok: false, text: ko.files.pickShares }
+      notice = { text: ko.files.pickShares }
       return
     }
     if (kind !== 'mkdir' && sel.length === 0) {
-      notice = { ok: false, text: ko.files.selectFirst }
+      notice = { text: ko.files.selectFirst }
       return
     }
     if (kind === 'rename' && sel.length !== 1) {
-      notice = { ok: false, text: ko.files.renameOne }
+      notice = { text: ko.files.renameOne }
       return
     }
     dialog = { kind, ...snapshotSelection(p, sel), view }
@@ -259,10 +269,10 @@
   </div>
 
   {#if notice}
-    <div class="notice" class:bad={!notice.ok}>
+    <div class="notice bad">
       <span>{notice.text}</span>
       {#if notice.detail}<span class="muted mono">{notice.detail}</span>{/if}
-      {#if notice.ok}<button on:click={() => dispatch('showTransfers')}>{ko.tabs.transfers}</button>{/if}
+      {#if notice.transfers}<button on:click={() => dispatch('showTransfers')}>{ko.tabs.transfers}</button>{/if}
       <button on:click={() => (notice = null)}>{ko.common.close}</button>
     </div>
   {/if}

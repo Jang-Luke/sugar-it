@@ -95,7 +95,7 @@ export const ko = {
     selectFirst: '먼저 항목을 선택하세요.',
     pickShares: '양쪽 패널에서 공유를 선택하세요.',
     sameFolder: '같은 폴더로는 보낼 수 없습니다.',
-    started: (n: number, op: string) => `${op} ${n}건을 시작했습니다. 진행 상황은 전송 탭에서 볼 수 있습니다.`,
+    jobsFailed: (n: number) => `전송 ${n}건에 오류가 있습니다. 전송 탭에서 확인하세요.`,
     opCopy: '복사',
     opMove: '이동',
     deleteTitle: '삭제 확인',

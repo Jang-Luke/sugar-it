@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { errorText, failedCount, percent, pollJobs } from './transfers'
+import { errorText, failedCount, jobFailureWatcher, percent, pollJobs } from './transfers'
 import { ko } from '../ko'
 import type { Api, Job } from './api'
 
@@ -135,5 +135,49 @@ describe('pollJobs', () => {
     await vi.advanceTimersByTimeAsync(1000)
     expect(jobs).toHaveBeenCalledTimes(2)
     stop()
+  })
+})
+
+describe('jobFailureWatcher', () => {
+  const j = (ID: string, State: string): Job => ({ ID, State }) as Job
+
+  it('stays quiet about failures that were already there when it first looked', () => {
+    const w = jobFailureWatcher()
+    expect(w.update([j('old', 'failed'), j('older', 'partial')])).toEqual([])
+    expect(w.update([j('old', 'failed'), j('older', 'partial')])).toEqual([])
+  })
+
+  it('reports a job that fails or partly fails after being seen active, once', () => {
+    const w = jobFailureWatcher()
+    w.update([j('a', 'running'), j('b', 'queued'), j('c', 'waiting_peer')])
+    expect(w.update([j('a', 'failed'), j('b', 'partial'), j('c', 'waiting_peer')]).map((x) => x.ID)).toEqual(['a', 'b'])
+    expect(w.update([j('a', 'failed'), j('b', 'partial'), j('c', 'waiting_peer')])).toEqual([])
+  })
+
+  it('stays quiet about success and cancellation', () => {
+    const w = jobFailureWatcher()
+    w.update([j('a', 'running'), j('b', 'running')])
+    expect(w.update([j('a', 'done'), j('b', 'canceled')])).toEqual([])
+  })
+
+  it('reports a job started here that failed before any poll saw it active', () => {
+    const w = jobFailureWatcher()
+    w.update([])
+    w.track('fast')
+    expect(w.update([j('fast', 'failed')]).map((x) => x.ID)).toEqual(['fast'])
+    expect(w.update([j('fast', 'failed')])).toEqual([])
+  })
+
+  it('stays quiet about a job first seen failed that was not started here', () => {
+    const w = jobFailureWatcher()
+    w.update([])
+    expect(w.update([j('elsewhere', 'failed')])).toEqual([])
+  })
+
+  it('reports a retried job that fails again', () => {
+    const w = jobFailureWatcher()
+    w.update([j('a', 'failed')])
+    w.update([j('a', 'running')])
+    expect(w.update([j('a', 'failed')]).map((x) => x.ID)).toEqual(['a'])
   })
 })

@@ -231,6 +231,10 @@ sugar-it --config-dir /tmp/b daemon --listen :8443 --control 127.0.0.1:8444 --da
     The menu closes on a click outside it, Escape and scrolling the list, and
     stays inside the window when opened near the right or bottom edge.
 
+    Starting a copy or move shows no notice. Make one fail, for example a move
+    onto an existing name with the conflict policy `fail`: a notice with a
+    button to the transfers tab appears once.
+
 ## Background daemon (`sugar-it daemon`)
 
 Linux was run by hand with a temporary config directory (start, `status`, a
