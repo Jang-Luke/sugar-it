@@ -1,0 +1,81 @@
+name: auto-release
+
+# Merging a pull request into main publishes a release: test the merge commit,
+# tag it, build. The labels no-release, release:minor and release:major change
+# what happens; see README.
+#
+# pull_request_target, because a pull_request token from a fork is read-only. It
+# runs with write access, so: never check out or run the pull request's head, only
+# merge_commit_sha, which is already on main; and never put pull request text in a
+# run script. The labels are read from the event file as data.
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Merges queue up and none is cancelled by a running one. GitHub keeps one pending
+# run per group, so a third merge during a run replaces the second's pending run.
+# Its commit then ships in the third's release, under the third's labels.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    if: github.event.pull_request.merged == true && !contains(github.event.pull_request.labels.*.name, 'no-release')
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+  tag:
+    name: tag the merge commit
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+      - name: Create and push the annotated tag
+        id: next
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$(git rev-parse HEAD) is not on main; nothing was tagged"
+            exit 1
+          fi
+          # Re-running every job after a release must not give the commit a second version.
+          existing=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          if [ -n "$existing" ]; then
+            echo "::error::this commit is already tagged ($existing); re-run only the failed jobs, or rebuild by hand"
+            exit 1
+          fi
+          mapfile -t labels < <(jq -r '.pull_request.labels[].name' "$GITHUB_EVENT_PATH")
+          tag=$(git tag --list | bash .github/scripts/next-version.sh "${labels[@]}")
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::the tag $tag already exists; nothing was tagged"
+            exit 1
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            tag -a "$tag" -m "$tag"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.tag.outputs.tag }}

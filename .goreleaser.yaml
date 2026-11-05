@@ -42,5 +42,10 @@ nfpms:
 checksum:
   name_template: checksums.txt
 
+release:
+  # A plain vX.Y.Z is a full release, which is what /releases/latest finds;
+  # a tag such as v1.2.3-rc1 is a pre-release.
+  prerelease: auto
+
 changelog:
-  disable: true
+  use: github-native

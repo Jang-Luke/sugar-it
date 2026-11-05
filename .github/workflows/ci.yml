@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # auto-release.yml runs this on a merge commit before it tags it.
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to test; empty means the commit of the event.
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -25,6 +33,8 @@ jobs:
             race: ""
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.27"
@@ -38,12 +48,24 @@ jobs:
           CGO_ENABLED=0 GOOS=windows go build ./...
           CGO_ENABLED=0 GOOS=darwin go build ./...
 
+  release-scripts:
+    name: release scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - run: bash .github/scripts/next-version-test.sh
+
   desktop:
     name: desktop (linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.27"

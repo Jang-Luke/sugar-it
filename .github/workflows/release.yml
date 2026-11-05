@@ -1,9 +1,18 @@
 name: release
 
-# Runs only when a version tag is pushed. The only credential is GITHUB_TOKEN.
+# Runs when a version tag is pushed by hand, and from auto-release.yml: a tag pushed
+# with GITHUB_TOKEN starts no workflow, so that one calls this directly. Each job
+# checks out the tag and uses TAG, because GITHUB_REF_NAME is main in a called run.
+# The only credential is GITHUB_TOKEN.
 on:
   push:
     tags: ["v[0-9]*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: The existing tag to build and publish.
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -15,10 +24,14 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4.2.2
         with:
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.27"
@@ -29,6 +42,22 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Names the tag when more than one points at this commit.
+          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
+      # The app finds updates through /releases/latest, which skips drafts and
+      # pre-releases. A plain version must therefore come out as a full release.
+      - name: Check that a plain version is a full release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            state=$(gh release view "$TAG" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease]|join(" ")')
+            if [ "$state" != "false false" ]; then
+              echo "::error::$TAG is not a full release (draft, prerelease: $state)"
+              exit 1
+            fi
+          fi
 
   desktop:
     name: sugar-it-desktop (${{ matrix.name }})
@@ -37,6 +66,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +92,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
       - uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.27"
@@ -83,7 +117,7 @@ jobs:
           done
       - name: Build
         working-directory: desktop
-        run: ${{ matrix.build }}
+        run: ${{ matrix.build }} -ldflags "-X main.version=${TAG#v}"
       - name: Package the asset
         working-directory: desktop
         run: |
@@ -93,8 +127,10 @@ jobs:
             *) cp "${{ matrix.from }}" "${{ matrix.asset }}" ;;
           esac
           test -s "${{ matrix.asset }}"
+          bash ../.github/scripts/write-sha256.sh "${{ matrix.asset }}"
       - name: Upload to the release
         working-directory: desktop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" "${{ matrix.asset }}" --clobber
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber
