@@ -25,10 +25,12 @@
 
 ## 1단계: 기반 (스펙 4절)
 
-- [ ] **Task 1.1 설정과 정책** — `internal/remote` 패키지: `Config`(enabled, allow{id,epoch}, target, networks), OS 기본 대상, 루프백 대상 검증, 허용 네트워크 파싱(기본 Tailscale), `Allowed(member, addr)` 판정. `config.Config.Remote` 필드. 단위 테스트.
-- [ ] **Task 1.2 Peer 터널** — `POST /v1/remote/tunnel` 서버(HTTP/2 확인, 검사 순서, 동시 4개, 대상 다이얼 5초, 양방향 복사와 flush, 호출자 제거 시 종료), 접속 기록 `remote.log`(회전 포함), `peerapi.Client.Tunnel`, 허용 네트워크 주소만 다이얼하는 원격 제어용 클라이언트. 두 데몬 + 에코 서버 테스트: 왕복, 꺼짐, 허용 안 됨, Epoch 불일치, 네트워크 밖, 대상 없음, 제거 시 끊김.
-- [ ] **Task 1.3 Control API와 CLI** — `GET /v1/remote`, `POST /v1/remote/settings`, `/allow`, `/deny`, `/connect`(요청 수명 동안만 리스너 유지). `sugar-it remote status|enable|disable|allow|deny|target|connect`. CLI 테스트와 README, 기본 설계에 원격 제어 링크.
-- [ ] **Task 1.4 수동 확인 절차** — `docs/manual-test.md`에 Tailscale 위에서 Mac 화면 공유를 `sugar-it remote connect` + VNC 뷰어로 여는 절차(S3 일부). 사용자 실행 대기.
+- [x] **Task 1.1 설정과 정책** — `internal/remote` 패키지: `Config`(enabled, allow{id,epoch}, target, networks), OS 기본 대상, 루프백 대상 검증, 허용 네트워크 파싱(기본 Tailscale), `Allowed(member, addr)` 판정. `config.Config.Remote` 필드. 단위 테스트.
+- [x] **Task 1.2 Peer 터널** — `POST /v1/remote/tunnel` 서버(HTTP/2 확인, 검사 순서, 동시 4개, 대상 다이얼 5초, 양방향 복사와 flush, 호출자 제거 시 종료), 접속 기록 `remote.log`(회전 포함), `peerapi.Client.Tunnel`, 허용 네트워크 주소만 다이얼하는 원격 제어용 클라이언트. 두 데몬 + 에코 서버 테스트: 왕복, 꺼짐, 허용 안 됨, Epoch 불일치, 네트워크 밖, 대상 없음, 제거 시 끊김.
+- [x] **Task 1.3 Control API와 CLI** — `GET /v1/remote`, `POST /v1/remote/settings`, `/allow`, `/deny`, `/connect`(요청 수명 동안만 리스너 유지). `sugar-it remote status|enable|disable|allow|deny|target|connect`. CLI 테스트와 README, 기본 설계에 원격 제어 링크.
+- [x] **Task 1.4 수동 확인 절차** — `docs/manual-test.md`에 Tailscale 위에서 Mac 화면 공유를 `sugar-it remote connect` + VNC 뷰어로 여는 절차(S3 일부). 사용자 실행 대기.
+
+**1단계 결과:** Linux에서 `go test -race ./...` 통과, 3개 OS × 2개 아키텍처 `CGO_ENABLED=0` 빌드 통과, 실제 바이너리 두 개로 거부, 허용, 왕복, 접속 기록, Ctrl+C 종료 확인. **미검증:** 실제 Tailscale과 macOS 화면 공유(`docs/manual-test.md`의 "Remote control tunnel to a Mac" 절차, 사용자 실행 대기). 테스트 위치: `internal/remote`, `internal/peerapi/tunnel_test.go`, `internal/control/remote_test.go`, `internal/cli/remote_test.go`.
 
 ## 0단계 스파이크 (스펙 9절)
 

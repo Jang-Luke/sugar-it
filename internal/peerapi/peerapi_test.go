@@ -59,6 +59,11 @@ type fakeBackend struct {
 	canceled   []string
 	retried    []string
 	callers    map[string]*fakeCaller
+
+	tunnelTarget string // "" refuses tunnels
+	tunnelCaller string
+	tunnelFrom   string
+	tunnelEnd    chan [2]int64 // bytes in and out of each finished session
 }
 
 type fakeCaller struct {

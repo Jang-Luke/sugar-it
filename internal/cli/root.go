@@ -163,7 +163,7 @@ func newRoot(e *env) *cobra.Command {
 	root.PersistentFlags().BoolVar(&e.json, "json", false, "print JSON (query commands)")
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr(err) })
-	root.AddCommand(e.daemonCmd(), e.stopCmd(), e.statusCmd(), e.inviteCmd(), e.peerCmd(), e.shareCmd(),
+	root.AddCommand(e.daemonCmd(), e.stopCmd(), e.statusCmd(), e.inviteCmd(), e.peerCmd(), e.shareCmd(), e.remoteCmd(),
 		e.lsCmd(), e.cpCmd("cp", "copy"), e.cpCmd("mv", "move"), e.rmCmd(), e.mkdirCmd(), e.renameCmd(), e.jobsCmd(), e.mountCmd(), e.unmountCmd(), e.serviceCmd())
 	return root
 }

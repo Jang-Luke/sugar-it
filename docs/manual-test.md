@@ -352,3 +352,38 @@ is not a pre-release, and that each desktop asset has a `.sha256` that verifies:
 release. A failing test must leave no tag. Re-run an old failed run after a newer release: it
 must fail at the tag step. Close a pull request unmerged during a queued release: the
 pending release must still run.
+
+## Remote control tunnel to a Mac (phase 1, spike S3; to be checked by the user)
+
+The tunnel was checked on Linux with two daemons and a stand-in TCP service.
+This checks it over Tailscale against macOS Screen Sharing. Both hosts need
+Tailscale up, the `sugar-it` CLI, a running daemon, and to be paired.
+
+On the Mac:
+
+1. System Settings, General, Sharing: turn on **Screen Sharing**. Under its
+   (i) button, note whether "VNC viewers may control screen with password" is
+   on; most Windows VNC viewers need either that password or support for
+   Apple's login (RealVNC Viewer has it).
+2. `tailscale ip -4` gives the Mac's 100.x address. On the Windows PC,
+   `sugar-it peer list --json` must show it among the Mac's addresses. If not,
+   restart the Mac's daemon with `sugar-it daemon --advertise <100.x>:7443`.
+3. `sugar-it remote allow <windows name>`, `sugar-it remote enable`,
+   `sugar-it remote status`: expect enabled, `127.0.0.1:5900 (system default)`
+   and the Windows host as an active allowed peer.
+
+On the Windows PC:
+
+4. `sugar-it remote connect <mac name>` prints `127.0.0.1:<port>`.
+5. Connect a VNC viewer to that address and log in. Expected: the Mac's screen,
+   working mouse and keyboard, and `viewer connected` in the terminal.
+6. Lock the Mac (Ctrl+Cmd+Q) and unlock it through the viewer.
+7. Close the lid with power and an external display connected (clamshell), and
+   reconnect.
+8. With the lid closed and no external display (the Mac sleeps), expect
+   `connect` to report the Mac as unreachable.
+
+Report: the viewer and the login it asked for (Mac account or VNC password),
+whether steps 5 to 8 behaved as expected, how responsive it felt, whether
+`tailscale status` shows the Mac as `direct` or via a relay, and the lines in
+the Mac's `remote.log` (config directory: `~/Library/Application Support/sugar-it`).

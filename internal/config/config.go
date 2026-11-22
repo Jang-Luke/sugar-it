@@ -15,6 +15,7 @@ import (
 
 	"sugarintegration/internal/fsutil"
 	"sugarintegration/internal/mesh"
+	"sugarintegration/internal/remote"
 	"sugarintegration/internal/shares"
 )
 
@@ -34,6 +35,7 @@ type Config struct {
 	MaxConcurrentJobs int           `json:"max_concurrent_jobs"`
 	Shares            []shares.Spec `json:"shares"`
 	Members           []mesh.Member `json:"members"`
+	Remote            remote.Config `json:"remote"`
 }
 
 // DefaultDir is the config directory used when --config-dir is not given.
@@ -81,6 +83,7 @@ func (c Config) clone() Config {
 	c.AdvertiseAddrs = slices.Clone(c.AdvertiseAddrs)
 	c.Shares = slices.Clone(c.Shares)
 	c.Members = slices.Clone(c.Members)
+	c.Remote = c.Remote.Clone()
 	for i := range c.Members {
 		c.Members[i].Addrs = slices.Clone(c.Members[i].Addrs)
 	}

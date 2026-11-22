@@ -76,6 +76,8 @@ type Node struct {
 
 	jobs atomic.Pointer[transfer.Manager]
 	port atomic.Int32 // the bound peer port, when it differs from the config
+
+	rc remoteState
 }
 
 type clientEntry struct {
@@ -113,6 +115,7 @@ func New(cfg *config.Store, id *identity.Identity) (*Node, error) {
 		clients: map[string]*clientEntry{},
 		callers: map[string]callerEntry{},
 		fsCache: map[string]*openShare{},
+		rc:      newRemoteState(),
 	}
 	n.tokens = mesh.NewTokens(func() time.Time { return n.now() })
 	if _, err := n.refreshSelf(); err != nil {

@@ -70,6 +70,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs", s.listJobs)
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /v1/jobs/{id}/retry", s.retryJob)
+	mux.HandleFunc("POST "+TunnelPath, s.tunnel)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, vfs.E(vfs.CodeNotFound, "no such endpoint"))
 	})

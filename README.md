@@ -266,6 +266,47 @@ Windows limits (from the Windows WebClient service, not from sugar-it):
 
 See [docs/manual-test.md](docs/manual-test.md) for the step-by-step checks.
 
+## Remote screen control (in progress)
+
+Design: `docs/superpowers/specs/2026-11-22-remote-control-design.md`; progress:
+`docs/superpowers/plans/2026-11-22-remote-control.md`. Phase 1, the tunnel, is
+done: a peer you allow can reach this host's screen service through the Peer
+API, over Tailscale only by default. The built-in viewer (phase 2) and the
+Windows screen agent (phase 3) do not exist yet, so for now you use your own
+VNC viewer, and only a Mac target (its built-in Screen Sharing) has something to
+connect to.
+
+On the host to be controlled (settings can only be changed there):
+
+```
+sugar-it remote allow <controller>   # until that peer is removed or re-paired
+sugar-it remote enable
+sugar-it remote status
+```
+
+On the controller:
+
+```
+sugar-it remote connect <target>     # prints 127.0.0.1:<port>; Ctrl+C stops it
+```
+
+then point a VNC viewer at the printed address. Each viewer connection is one
+tunnel; the forward lasts only while `connect` runs.
+
+- **Tailscale only:** the target refuses tunnels whose TCP connection does not
+  come from `100.64.0.0/10` or `fd7a:115c:a1e0::/48`, and the controller dials
+  only the target's addresses in those ranges, so the target must advertise its
+  Tailscale address (`sugar-it peer list` on the controller shows it). Change
+  the ranges with `sugar-it remote networks <cidr>...`, and go back to Tailscale
+  with `sugar-it remote networks`.
+- **Target address:** macOS uses `127.0.0.1:5900` (Screen Sharing) and Windows
+  `127.0.0.1:7446` (the future agent). Other systems have none and need
+  `sugar-it remote target <loopback host:port>`. Only loopback addresses are
+  accepted, so a tunnel can never reach another machine.
+- **Access log:** `remote.log` in the config directory records every opened,
+  closed and refused tunnel (peer, address, bytes, duration), never its content.
+- At most 4 tunnels at once per target. Removing a peer ends its tunnels at once.
+
 ## Verification status
 
 Verified on the Linux build host:

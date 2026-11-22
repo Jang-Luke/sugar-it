@@ -66,6 +66,11 @@ func NewServer(d Deps) *http.Server {
 	mux.HandleFunc("GET /v1/jobs/{host}/{id}", s.job)
 	mux.HandleFunc("POST /v1/jobs/{host}/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /v1/jobs/{host}/{id}/retry", s.retryJob)
+	mux.HandleFunc("GET /v1/remote", s.remoteStatus)
+	mux.HandleFunc("POST /v1/remote/settings", s.remoteSettings)
+	mux.HandleFunc("POST /v1/remote/allow", s.remoteAllow)
+	mux.HandleFunc("POST /v1/remote/deny", s.remoteDeny)
+	mux.HandleFunc("POST /v1/remote/connect", s.remoteConnect)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, vfs.E(vfs.CodeNotFound, "no such endpoint"))
 	})

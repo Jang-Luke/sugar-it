@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"sugarintegration/internal/mesh"
+	"sugarintegration/internal/remote"
 	"sugarintegration/internal/transfer"
 	"sugarintegration/internal/vfs"
 )
@@ -54,6 +55,9 @@ type Backend interface {
 	ListJobs(origin string) []transfer.Job
 	CancelJob(id string) error
 	RetryJob(id string) error
+	// OpenTunnel connects member callerID, whose TCP connection comes from
+	// remoteAddr, to this host's screen service if the policy allows it.
+	OpenTunnel(ctx context.Context, callerID, remoteAddr string) (*remote.Session, error)
 }
 
 // maxJSONBody bounds every JSON request body. File uploads are not bounded.

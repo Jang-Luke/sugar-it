@@ -6,6 +6,7 @@ import (
 
 	"sugarintegration/internal/mesh"
 	"sugarintegration/internal/peerapi"
+	"sugarintegration/internal/remote"
 	"sugarintegration/internal/transfer"
 	"sugarintegration/internal/vfs"
 )
@@ -247,4 +248,8 @@ func (b backend) RetryJob(id string) error {
 		return m.Retry(id)
 	}
 	return errNoJobs
+}
+
+func (b backend) OpenTunnel(ctx context.Context, callerID, remoteAddr string) (*remote.Session, error) {
+	return b.n.OpenTunnel(ctx, callerID, remoteAddr)
 }
